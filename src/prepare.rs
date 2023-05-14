@@ -61,6 +61,11 @@ fn prepare_expression(expr: Expr<String, String>, namespace: &mut Namespace) -> 
             op,
             right: Box::new(prepare_expression(*right, namespace)?),
         }),
+        Expr::CmpOp { left, op, right } => Ok(Expr::CmpOp {
+            left: Box::new(prepare_expression(*left, namespace)?),
+            op,
+            right: Box::new(prepare_expression(*right, namespace)?),
+        }),
         Expr::Call { func, args } => {
             let func = Builtins::find(&func)?;
             Ok(Expr::Call {

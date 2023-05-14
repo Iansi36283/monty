@@ -6,7 +6,7 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::parse_program;
 
-use crate::types::{Expr, Node, Operator, Value};
+use crate::types::{Expr, Node, Operator, CmpOperator, Value};
 
 pub type ParseResult<T> = Result<T, Cow<'static, str>>;
 
@@ -201,7 +201,7 @@ fn parse_expression(expression: AstExpr) -> ParseResult<ParseExpr> {
         ExprKind::Await { value: _ } => todo!("Await"),
         ExprKind::Yield { value: _ } => todo!("Yield"),
         ExprKind::YieldFrom { value: _ } => todo!("YieldFrom"),
-        ExprKind::Compare { left, ops, comparators } => Ok(Expr::Op {
+        ExprKind::Compare { left, ops, comparators } => Ok(Expr::CmpOp {
             left: Box::new(parse_expression(*left)?),
             op: convert_compare_op(first(ops)?),
             right: Box::new(parse_expression(first(comparators)?)?),
@@ -294,18 +294,18 @@ fn convert_bool_op(op: Boolop) -> Operator {
     }
 }
 
-fn convert_compare_op(op: Cmpop) -> Operator {
+fn convert_compare_op(op: Cmpop) -> CmpOperator {
     match op {
-        Cmpop::Eq => Operator::Eq,
-        Cmpop::NotEq => Operator::NotEq,
-        Cmpop::Lt => Operator::Lt,
-        Cmpop::LtE => Operator::LtE,
-        Cmpop::Gt => Operator::Gt,
-        Cmpop::GtE => Operator::GtE,
-        Cmpop::Is => Operator::Is,
-        Cmpop::IsNot => Operator::IsNot,
-        Cmpop::In => Operator::In,
-        Cmpop::NotIn => Operator::NotIn,
+        Cmpop::Eq => CmpOperator::Eq,
+        Cmpop::NotEq => CmpOperator::NotEq,
+        Cmpop::Lt => CmpOperator::Lt,
+        Cmpop::LtE => CmpOperator::LtE,
+        Cmpop::Gt => CmpOperator::Gt,
+        Cmpop::GtE => CmpOperator::GtE,
+        Cmpop::Is => CmpOperator::Is,
+        Cmpop::IsNot => CmpOperator::IsNot,
+        Cmpop::In => CmpOperator::In,
+        Cmpop::NotIn => CmpOperator::NotIn,
     }
 }
 

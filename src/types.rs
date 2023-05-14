@@ -19,7 +19,11 @@ pub(crate) enum Operator {
     // bool operators
     And,
     Or,
-    // compare
+}
+
+/// Defined separately since these operators always return a bool
+#[derive(Clone, Debug, PartialEq)]
+pub enum CmpOperator {
     Eq,
     NotEq,
     Lt,
@@ -44,6 +48,11 @@ pub(crate) enum Expr<T, Funcs> {
     Op {
         left: Box<Expr<T, Funcs>>,
         op: Operator,
+        right: Box<Expr<T, Funcs>>,
+    },
+    CmpOp {
+        left: Box<Expr<T, Funcs>>,
+        op: CmpOperator,
         right: Box<Expr<T, Funcs>>,
     },
     List(Vec<Expr<T, Funcs>>),
@@ -187,37 +196,23 @@ impl Value {
         }
     }
 
-    pub fn eq(&self, other: &Self) -> Option<Self> {
+    pub fn eq(&self, other: &Self) -> Option<bool> {
         match (self, other) {
             (Self::Undefined, _) => None,
             (_, Self::Undefined) => None,
-            (Self::Int(v1), Self::Int(v2)) => Some((v1 == v2).into()),
-            (Self::Str(v1), Self::Str(v2)) => Some((v1 == v2).into()),
-            (Self::List(v1), Self::List(v2)) => {
-                if v1.len() != v2.len() {
-                    Some(Self::False)
-                } else {
-                    for (v1, v2) in v1.into_iter().zip(v2.into_iter()) {
-                        if let Some(v) = v1.eq(v2) {
-                            if v == Self::False {
-                                return Some(Self::False);
-                            }
-                        } else {
-                            return None;
-                        }
-                    }
-                    Some(Self::True)
-                }
-            }
-            (Self::Range(v1), Self::Range(v2)) => Some((v1 == v2).into()),
-            (Self::True, Self::True) => Some(Self::True),
-            (Self::True, Self::Int(v2)) => Some((1 == *v2).into()),
-            (Self::Int(v1), Self::True) => Some((*v1 == 1).into()),
-            (Self::False, Self::False) => Some(Self::True),
-            (Self::False, Self::Int(v2)) => Some((0 == *v2).into()),
-            (Self::Int(v1), Self::False) => Some((*v1 == 0).into()),
-            (Self::None, Self::None) => Some(Self::True),
-            _ => Some(Self::False),
+            (Self::Int(v1), Self::Int(v2)) => Some(v1 == v2),
+            (Self::Str(v1), Self::Str(v2)) => Some(v1 == v2),
+            (Self::List(v1), Self::List(v2)) => vecs_equal(v1, v2),
+            (Self::Tuple(v1), Self::Tuple(v2)) => vecs_equal(v1, v2),
+            (Self::Range(v1), Self::Range(v2)) => Some(v1 == v2),
+            (Self::True, Self::True) => Some(true),
+            (Self::True, Self::Int(v2)) => Some(1 == *v2),
+            (Self::Int(v1), Self::True) => Some(*v1 == 1),
+            (Self::False, Self::False) => Some(true),
+            (Self::False, Self::Int(v2)) => Some(0 == *v2),
+            (Self::Int(v1), Self::False) => Some(*v1 == 0),
+            (Self::None, Self::None) => Some(true),
+            _ => Some(false),
         }
     }
 
@@ -254,5 +249,22 @@ impl Value {
             (Self::Int(v1), Self::Float(v2)) => Some(Self::Float((*v1 as f64) % v2)),
             _ => None,
         }
+    }
+}
+
+fn vecs_equal(v1: &[Value], v2: &[Value]) -> Option<bool> {
+    if v1.len() != v2.len() {
+        Some(false)
+    } else {
+        for (v1, v2) in v1.into_iter().zip(v2.into_iter()) {
+            if let Some(v) = v1.eq(v2) {
+                if !v {
+                    return Some(false);
+                }
+            } else {
+                return None;
+            }
+        }
+        Some(true)
     }
 }

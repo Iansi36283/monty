@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::prepare::{RunExpr, RunNode};
-use crate::types::{Builtins, Expr, Node, Operator, Value};
+use crate::types::{Builtins, CmpOperator, Expr, Node, Operator, Value};
 
 pub type RunResult<T> = Result<T, Cow<'static, str>>;
 
@@ -64,6 +64,7 @@ impl Frame {
             }
             Expr::Call { func, args } => self.call_function(func, args),
             Expr::Op { left, op, right } => self.op(left, op, right),
+            Expr::CmpOp { left, op, right } => Ok(Cow::Owned(self.cmp_op(left, op, right)?.into())),
             Expr::List(elements) => {
                 let values = elements
                     .iter()
@@ -74,6 +75,16 @@ impl Frame {
                     })
                     .collect::<RunResult<_>>()?;
                 Ok(Cow::Owned(Value::List(values)))
+            }
+        }
+    }
+
+    fn execute_expr_bool(&self, expr: &RunExpr) -> RunResult<bool> {
+        match expr {
+            Expr::CmpOp { left, op, right } => self.cmp_op(left, op, right),
+            _ => {
+                let value = self.execute_expr(expr)?;
+                value.as_ref().bool().ok_or_else(|| Cow::Owned(format!("Cannot convert {} to bool", value.as_ref())))
             }
         }
     }
@@ -138,11 +149,7 @@ impl Frame {
     }
 
     fn if_(&mut self, test: &RunExpr, body: &[RunNode], or_else: &[RunNode]) -> RunResult<()> {
-        let test = self.execute_expr(test)?;
-        if test
-            .bool()
-            .ok_or_else(|| Cow::Owned(format!("Cannot convert {test} to bool")))?
-        {
+        if self.execute_expr_bool(test)? {
             self.execute(body)?;
         } else {
             self.execute(or_else)?;
@@ -156,21 +163,33 @@ impl Frame {
         let op_value: Option<Value> = match op {
             Operator::Add => left_value.add(&right_value),
             Operator::Sub => left_value.sub(&right_value),
-            Operator::Eq => left_value.as_ref().eq(&right_value),
-            Operator::NotEq => match left_value.as_ref().eq(&right_value) {
-                Some(value) => value.invert(),
-                None => None,
-            },
-            Operator::Gt => Some(left_value.gt(&right_value).into()),
-            Operator::GtE => Some(left_value.ge(&right_value).into()),
-            Operator::Lt => Some(left_value.lt(&right_value).into()),
-            Operator::LtE => Some(left_value.le(&right_value).into()),
             Operator::Mod => left_value.modulo(&right_value),
             _ => return Err(format!("Operator {op:?} not yet implemented").into()),
         };
         match op_value {
             Some(value) => Ok(Cow::Owned(value)),
             None => Err(format!("Cannot apply operator {left:?} {op:?} {right:?}").into()),
+        }
+    }
+
+    fn cmp_op(&self, left: &RunExpr, op: &CmpOperator, right: &RunExpr) -> RunResult<bool> {
+        let left_value = self.execute_expr(left)?;
+        let right_value = self.execute_expr(right)?;
+        let op_value: Option<bool> = match op {
+            CmpOperator::Eq => left_value.as_ref().eq(&right_value),
+            CmpOperator::NotEq => match left_value.as_ref().eq(&right_value) {
+                Some(value) => Some(!value),
+                None => None,
+            },
+            CmpOperator::Gt => Some(left_value.gt(&right_value)),
+            CmpOperator::GtE => Some(left_value.ge(&right_value)),
+            CmpOperator::Lt => Some(left_value.lt(&right_value)),
+            CmpOperator::LtE => Some(left_value.le(&right_value)),
+            _ => return Err(format!("CmpOperator {op:?} not yet implemented").into()),
+        };
+        match op_value {
+            Some(value) => Ok(value),
+            None => Err(format!("Cannot apply comparison operator {left:?} {op:?} {right:?}").into()),
         }
     }
 }
