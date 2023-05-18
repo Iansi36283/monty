@@ -59,6 +59,19 @@ pub(crate) enum Expr<T, Funcs> {
     List(Vec<Expr<T, Funcs>>),
 }
 
+impl<T, Funcs> Expr<T, Funcs> {
+    pub fn is_const(&self) -> bool {
+        matches!(self, Self::Constant(_))
+    }
+
+    pub fn into_const(self) -> Object {
+        match self {
+            Self::Constant(object) => object,
+            _ => panic!("into_const can only be called on Constant expression.")
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Node<Vars, Funcs> {
     Pass,
@@ -100,6 +113,14 @@ impl Builtins {
             "range" => Ok(Self::Range),
             "len" => Ok(Self::Len),
             _ => Err(format!("unknown builtin: {name}").into()),
+        }
+    }
+
+    /// whether the function has side effects
+    pub fn side_effects(&self) -> bool {
+        match self {
+            Self::Print => true,
+            _ => false,
         }
     }
 }

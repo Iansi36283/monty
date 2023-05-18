@@ -1,3 +1,4 @@
+mod evaluate;
 mod parse;
 mod prepare;
 mod object;
@@ -73,8 +74,8 @@ struct Executor {
 impl Executor {
     fn new(code: &str, filename: &str, input_names: &[&str]) -> ParseResult<Self> {
         let nodes = parse(code, filename)?;
-        // dbg!(&nodes);
         let (initial_namespace, nodes) = prepare(nodes, input_names)?;
+        dbg!(&nodes);
         Ok(Self {
             initial_namespace,
             nodes,
