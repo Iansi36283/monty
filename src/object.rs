@@ -172,6 +172,15 @@ impl Object {
             _ => None,
         }
     }
+
+    pub fn repr(&self) -> String {
+        // TODO these need to match python escaping
+        match self {
+            Self::Str(v) => format!("\"{}\"", v),
+            Self::Bytes(v) => format!("b\"{:?}\"", v),
+            _ => self.to_string(),
+        }
+    }
 }
 
 fn vecs_equal(v1: &[Object], v2: &[Object]) -> Option<bool> {

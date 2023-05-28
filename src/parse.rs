@@ -2,12 +2,12 @@ use std::borrow::Cow;
 
 use num::ToPrimitive;
 use rustpython_parser::ast::{
-    Boolop, Cmpop, Constant, Expr as AstExpr, ExprKind, Keyword, Operator as AstOperator, Stmt, StmtKind,
+    Boolop, Cmpop, Constant, Expr as AstExpr, ExprKind, Keyword, Operator as AstOperator, Stmt, StmtKind, TextRange,
 };
 use rustpython_parser::parse_program;
 
 use crate::object::Object;
-use crate::types::{CmpOperator, Expr, ExprLoc, Function, Identifier, Kwarg, Node, Operator, Position};
+use crate::types::{CmpOperator, CodePosition, CodeRange, Expr, ExprLoc, Function, Identifier, Kwarg, Node, Operator};
 
 pub type ParseResult<T> = Result<T, Cow<'static, str>>;
 
@@ -15,242 +15,289 @@ pub(crate) fn parse(code: &str, filename: &str) -> ParseResult<Vec<Node>> {
     match parse_program(code, filename) {
         Ok(ast) => {
             // dbg!(&ast);
-            parse_statements(ast)
+            let parser = Parser {
+                line_ends: get_line_ends(code),
+            };
+            parser.parse_statements(ast)
         }
         Err(e) => Err(format!("Parse error: {e}").into()),
     }
 }
 
-fn parse_statements(statements: Vec<Stmt>) -> ParseResult<Vec<Node>> {
-    statements.into_iter().map(parse_statement).collect()
+/// position of each line in the source code, to convert indexes to line number and column number
+fn get_line_ends(code: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (i, c) in code.chars().enumerate() {
+        if c == '\n' {
+            offsets.push(i);
+        }
+    }
+    offsets
 }
 
-fn parse_statement(statement: Stmt) -> ParseResult<Node> {
-    match statement.node {
-        StmtKind::FunctionDef {
-            name: _,
-            args: _,
-            body: _,
-            decorator_list: _,
-            returns: _,
-            type_comment: _,
-        } => todo!("FunctionDef"),
-        StmtKind::AsyncFunctionDef {
-            name: _,
-            args: _,
-            body: _,
-            decorator_list: _,
-            returns: _,
-            type_comment: _,
-        } => todo!("AsyncFunctionDef"),
-        StmtKind::ClassDef {
-            name: _,
-            bases: _,
-            keywords: _,
-            body: _,
-            decorator_list: _,
-        } => todo!("ClassDef"),
-        StmtKind::Return { value: _ } => todo!("Return"),
-        StmtKind::Delete { targets: _ } => todo!("Delete"),
-        StmtKind::Assign { targets, value, .. } => parse_assignment(first(targets)?, *value),
-        StmtKind::AugAssign { target, op, value } => Ok(Node::OpAssign {
-            target: parse_identifier(*target)?,
-            op: convert_op(op),
-            object: parse_expression(*value)?,
-        }),
-        StmtKind::AnnAssign { target, value, .. } => match value {
-            Some(value) => parse_assignment(*target, *value),
-            None => Ok(Node::Pass),
-        },
-        StmtKind::For {
-            target,
-            iter,
-            body,
-            orelse,
-            ..
-        } => {
-            let target = parse_expression(*target)?;
-            let iter = parse_expression(*iter)?;
-            let body = parse_statements(body)?;
-            let or_else = parse_statements(orelse)?;
-            Ok(Node::For {
+pub struct Parser {
+    line_ends: Vec<usize>,
+}
+
+impl Parser {
+    fn parse_statements(&self, statements: Vec<Stmt>) -> ParseResult<Vec<Node>> {
+        statements.into_iter().map(|f| self.parse_statement(f)).collect()
+    }
+
+    fn parse_statement(&self, statement: Stmt) -> ParseResult<Node> {
+        match statement.node {
+            StmtKind::FunctionDef {
+                name: _,
+                args: _,
+                body: _,
+                decorator_list: _,
+                returns: _,
+                type_comment: _,
+            } => todo!("FunctionDef"),
+            StmtKind::AsyncFunctionDef {
+                name: _,
+                args: _,
+                body: _,
+                decorator_list: _,
+                returns: _,
+                type_comment: _,
+            } => todo!("AsyncFunctionDef"),
+            StmtKind::ClassDef {
+                name: _,
+                bases: _,
+                keywords: _,
+                body: _,
+                decorator_list: _,
+            } => todo!("ClassDef"),
+            StmtKind::Return { value: _ } => todo!("Return"),
+            StmtKind::Delete { targets: _ } => todo!("Delete"),
+            StmtKind::Assign { targets, value, .. } => self.parse_assignment(first(targets)?, *value),
+            StmtKind::AugAssign { target, op, value } => Ok(Node::OpAssign {
+                target: self.parse_identifier(*target)?,
+                op: convert_op(op),
+                object: self.parse_expression(*value)?,
+            }),
+            StmtKind::AnnAssign { target, value, .. } => match value {
+                Some(value) => self.parse_assignment(*target, *value),
+                None => Ok(Node::Pass),
+            },
+            StmtKind::For {
                 target,
                 iter,
                 body,
-                or_else,
-            })
-        }
-        StmtKind::AsyncFor {
-            target: _,
-            iter: _,
-            body: _,
-            orelse: _,
-            type_comment: _,
-        } => todo!("AsyncFor"),
-        StmtKind::While {
-            test: _,
-            body: _,
-            orelse: _,
-        } => todo!("While"),
-        StmtKind::If { test, body, orelse } => {
-            let test = parse_expression(*test)?;
-            let body = parse_statements(body)?;
-            let or_else = parse_statements(orelse)?;
-            Ok(Node::If { test, body, or_else })
-        }
-        StmtKind::With {
-            items: _,
-            body: _,
-            type_comment: _,
-        } => todo!("With"),
-        StmtKind::AsyncWith {
-            items: _,
-            body: _,
-            type_comment: _,
-        } => todo!("AsyncWith"),
-        StmtKind::Match { subject: _, cases: _ } => todo!("Match"),
-        StmtKind::Raise { exc: _, cause: _ } => todo!("Raise"),
-        StmtKind::Try {
-            body: _,
-            handlers: _,
-            orelse: _,
-            finalbody: _,
-        } => todo!("Try"),
-        StmtKind::TryStar {
-            body: _,
-            handlers: _,
-            orelse: _,
-            finalbody: _,
-        } => todo!("TryStar"),
-        StmtKind::Assert { test: _, msg: _ } => todo!("Assert"),
-        StmtKind::Import { names: _ } => todo!("Import"),
-        StmtKind::ImportFrom {
-            module: _,
-            names: _,
-            level: _,
-        } => todo!("ImportFrom"),
-        StmtKind::Global { names: _ } => todo!("Global"),
-        StmtKind::Nonlocal { names: _ } => todo!("Nonlocal"),
-        StmtKind::Expr { value } => Ok(Node::Expr(parse_expression(*value)?)),
-        StmtKind::Pass => Ok(Node::Pass),
-        StmtKind::Break => todo!("Break"),
-        StmtKind::Continue => todo!("Continue"),
-    }
-}
-
-/// `lhs = rhs` -> `lhs, rhs`
-fn parse_assignment(lhs: AstExpr, rhs: AstExpr) -> ParseResult<Node> {
-    Ok(Node::Assign {
-        target: parse_identifier(lhs)?,
-        object: parse_expression(rhs)?,
-    })
-}
-
-fn parse_expression(expression: AstExpr) -> ParseResult<ExprLoc> {
-    let AstExpr { node, range, custom: _ } = expression;
-    match node {
-        ExprKind::BoolOp { op, values } => {
-            if values.len() != 2 {
-                return Err("BoolOp must have 2 values".into());
+                orelse,
+                ..
+            } => {
+                let target = self.parse_expression(*target)?;
+                let iter = self.parse_expression(*iter)?;
+                let body = self.parse_statements(body)?;
+                let or_else = self.parse_statements(orelse)?;
+                Ok(Node::For {
+                    target,
+                    iter,
+                    body,
+                    or_else,
+                })
             }
-            let mut values = values.into_iter();
-            let left = Box::new(parse_expression(values.next().unwrap())?);
-            let right = Box::new(parse_expression(values.next().unwrap())?);
-            Ok(ExprLoc {
-                position: Position::from_range(&range),
-                expr: Expr::Op {
-                    left,
-                    op: convert_bool_op(op),
-                    right,
-                },
-            })
+            StmtKind::AsyncFor {
+                target: _,
+                iter: _,
+                body: _,
+                orelse: _,
+                type_comment: _,
+            } => todo!("AsyncFor"),
+            StmtKind::While {
+                test: _,
+                body: _,
+                orelse: _,
+            } => todo!("While"),
+            StmtKind::If { test, body, orelse } => {
+                let test = self.parse_expression(*test)?;
+                let body = self.parse_statements(body)?;
+                let or_else = self.parse_statements(orelse)?;
+                Ok(Node::If { test, body, or_else })
+            }
+            StmtKind::With {
+                items: _,
+                body: _,
+                type_comment: _,
+            } => todo!("With"),
+            StmtKind::AsyncWith {
+                items: _,
+                body: _,
+                type_comment: _,
+            } => todo!("AsyncWith"),
+            StmtKind::Match { subject: _, cases: _ } => todo!("Match"),
+            StmtKind::Raise { exc: _, cause: _ } => todo!("Raise"),
+            StmtKind::Try {
+                body: _,
+                handlers: _,
+                orelse: _,
+                finalbody: _,
+            } => todo!("Try"),
+            StmtKind::TryStar {
+                body: _,
+                handlers: _,
+                orelse: _,
+                finalbody: _,
+            } => todo!("TryStar"),
+            StmtKind::Assert { test: _, msg: _ } => todo!("Assert"),
+            StmtKind::Import { names: _ } => todo!("Import"),
+            StmtKind::ImportFrom {
+                module: _,
+                names: _,
+                level: _,
+            } => todo!("ImportFrom"),
+            StmtKind::Global { names: _ } => todo!("Global"),
+            StmtKind::Nonlocal { names: _ } => todo!("Nonlocal"),
+            StmtKind::Expr { value } => Ok(Node::Expr(self.parse_expression(*value)?)),
+            StmtKind::Pass => Ok(Node::Pass),
+            StmtKind::Break => todo!("Break"),
+            StmtKind::Continue => todo!("Continue"),
         }
-        ExprKind::NamedExpr { target: _, value: _ } => todo!("NamedExpr"),
-        ExprKind::BinOp { left, op, right } => {
-            let left = Box::new(parse_expression(*left)?);
-            let right = Box::new(parse_expression(*right)?);
-            Ok(ExprLoc {
-                position: Position::from_range(&range),
-                expr: Expr::Op {
-                    left,
-                    op: convert_op(op),
-                    right,
-                },
-            })
-        }
-        ExprKind::UnaryOp { op: _, operand: _ } => todo!("UnaryOp"),
-        ExprKind::Lambda { args: _, body: _ } => todo!("Lambda"),
-        ExprKind::IfExp {
-            test: _,
-            body: _,
-            orelse: _,
-        } => todo!("IfExp"),
-        ExprKind::Dict { keys: _, values: _ } => todo!("Dict"),
-        ExprKind::Set { elts: _ } => todo!("Set"),
-        ExprKind::ListComp { elt: _, generators: _ } => todo!("ListComp"),
-        ExprKind::SetComp { elt: _, generators: _ } => todo!("SetComp"),
-        ExprKind::DictComp {
-            key: _,
-            value: _,
-            generators: _,
-        } => todo!("DictComp"),
-        ExprKind::GeneratorExp { elt: _, generators: _ } => todo!("GeneratorExp"),
-        ExprKind::Await { value: _ } => todo!("Await"),
-        ExprKind::Yield { value: _ } => todo!("Yield"),
-        ExprKind::YieldFrom { value: _ } => todo!("YieldFrom"),
-        ExprKind::Compare { left, ops, comparators } => Ok(ExprLoc::from_expr(
-            &range,
-            Expr::CmpOp {
-                left: Box::new(parse_expression(*left)?),
-                op: convert_compare_op(first(ops)?),
-                right: Box::new(parse_expression(first(comparators)?)?),
-            },
-        )),
-        ExprKind::Call { func, args, keywords } => {
-            let func = Function::Ident(parse_identifier(*func)?);
-            let args = args.into_iter().map(parse_expression).collect::<ParseResult<_>>()?;
-            let kwargs = keywords
-                .into_iter()
-                .map(parse_kwargs)
-                .collect::<ParseResult<Vec<_>>>()?;
-            Ok(ExprLoc::from_expr(&range, Expr::Call { func, args, kwargs }))
-        }
-        ExprKind::FormattedValue {
-            value: _,
-            conversion: _,
-            format_spec: _,
-        } => todo!("FormattedValue"),
-        ExprKind::JoinedStr { values: _ } => todo!("JoinedStr"),
-        ExprKind::Constant { value, .. } => Ok(ExprLoc::from_expr(&range, Expr::Constant(convert_const(value)?))),
-        ExprKind::Attribute {
-            value: _,
-            attr: _,
-            ctx: _,
-        } => todo!("Attribute"),
-        ExprKind::Subscript {
-            value: _,
-            slice: _,
-            ctx: _,
-        } => todo!("Subscript"),
-        ExprKind::Starred { value: _, ctx: _ } => todo!("Starred"),
-        ExprKind::Name { id, .. } => Ok(ExprLoc::from_expr(&range, Expr::Name(Identifier::from_name(id)))),
-        ExprKind::List { elts: _, ctx: _ } => todo!("List"),
-        ExprKind::Tuple { elts: _, ctx: _ } => todo!("Tuple"),
-        ExprKind::Slice {
-            lower: _,
-            upper: _,
-            step: _,
-        } => todo!("Slice"),
     }
-}
 
-fn parse_kwargs(kwarg: Keyword) -> ParseResult<Kwarg> {
-    let key = match kwarg.node.arg {
-        Some(key) => Identifier::from_name(key),
-        None => return Err("kwargs with no key".into()),
-    };
-    let value = parse_expression(kwarg.node.value)?;
-    Ok(Kwarg { key, value })
+    /// `lhs = rhs` -> `lhs, rhs`
+    fn parse_assignment(&self, lhs: AstExpr, rhs: AstExpr) -> ParseResult<Node> {
+        Ok(Node::Assign {
+            target: self.parse_identifier(lhs)?,
+            object: self.parse_expression(rhs)?,
+        })
+    }
+
+    fn parse_expression(&self, expression: AstExpr) -> ParseResult<ExprLoc> {
+        let AstExpr { node, range, custom: _ } = expression;
+        match node {
+            ExprKind::BoolOp { op, values } => {
+                if values.len() != 2 {
+                    return Err("BoolOp must have 2 values".into());
+                }
+                let mut values = values.into_iter();
+                let left = Box::new(self.parse_expression(values.next().unwrap())?);
+                let right = Box::new(self.parse_expression(values.next().unwrap())?);
+                Ok(ExprLoc {
+                    position: self.convert_range(&range),
+                    expr: Expr::Op {
+                        left,
+                        op: convert_bool_op(op),
+                        right,
+                    },
+                })
+            }
+            ExprKind::NamedExpr { target: _, value: _ } => todo!("NamedExpr"),
+            ExprKind::BinOp { left, op, right } => {
+                let left = Box::new(self.parse_expression(*left)?);
+                let right = Box::new(self.parse_expression(*right)?);
+                Ok(ExprLoc {
+                    position: self.convert_range(&range),
+                    expr: Expr::Op {
+                        left,
+                        op: convert_op(op),
+                        right,
+                    },
+                })
+            }
+            ExprKind::UnaryOp { op: _, operand: _ } => todo!("UnaryOp"),
+            ExprKind::Lambda { args: _, body: _ } => todo!("Lambda"),
+            ExprKind::IfExp {
+                test: _,
+                body: _,
+                orelse: _,
+            } => todo!("IfExp"),
+            ExprKind::Dict { keys: _, values: _ } => todo!("Dict"),
+            ExprKind::Set { elts: _ } => todo!("Set"),
+            ExprKind::ListComp { elt: _, generators: _ } => todo!("ListComp"),
+            ExprKind::SetComp { elt: _, generators: _ } => todo!("SetComp"),
+            ExprKind::DictComp {
+                key: _,
+                value: _,
+                generators: _,
+            } => todo!("DictComp"),
+            ExprKind::GeneratorExp { elt: _, generators: _ } => todo!("GeneratorExp"),
+            ExprKind::Await { value: _ } => todo!("Await"),
+            ExprKind::Yield { value: _ } => todo!("Yield"),
+            ExprKind::YieldFrom { value: _ } => todo!("YieldFrom"),
+            ExprKind::Compare { left, ops, comparators } => Ok(ExprLoc::new(
+                self.convert_range(&range),
+                Expr::CmpOp {
+                    left: Box::new(self.parse_expression(*left)?),
+                    op: convert_compare_op(first(ops)?),
+                    right: Box::new(self.parse_expression(first(comparators)?)?),
+                },
+            )),
+            ExprKind::Call { func, args, keywords } => {
+                let func = Function::Ident(self.parse_identifier(*func)?);
+                let args = args
+                    .into_iter()
+                    .map(|f| self.parse_expression(f))
+                    .collect::<ParseResult<_>>()?;
+                let kwargs = keywords
+                    .into_iter()
+                    .map(|f| self.parse_kwargs(f))
+                    .collect::<ParseResult<Vec<_>>>()?;
+                Ok(ExprLoc::new(self.convert_range(&range), Expr::Call { func, args, kwargs }))
+            }
+            ExprKind::FormattedValue {
+                value: _,
+                conversion: _,
+                format_spec: _,
+            } => todo!("FormattedValue"),
+            ExprKind::JoinedStr { values: _ } => todo!("JoinedStr"),
+            ExprKind::Constant { value, .. } => Ok(ExprLoc::new(self.convert_range(&range), Expr::Constant(convert_const(value)?))),
+            ExprKind::Attribute {
+                value: _,
+                attr: _,
+                ctx: _,
+            } => todo!("Attribute"),
+            ExprKind::Subscript {
+                value: _,
+                slice: _,
+                ctx: _,
+            } => todo!("Subscript"),
+            ExprKind::Starred { value: _, ctx: _ } => todo!("Starred"),
+            ExprKind::Name { id, .. } => Ok(ExprLoc::new(self.convert_range(&range), Expr::Name(Identifier::from_name(id)))),
+            ExprKind::List { elts: _, ctx: _ } => todo!("List"),
+            ExprKind::Tuple { elts: _, ctx: _ } => todo!("Tuple"),
+            ExprKind::Slice {
+                lower: _,
+                upper: _,
+                step: _,
+            } => todo!("Slice"),
+        }
+    }
+
+    fn parse_kwargs(&self, kwarg: Keyword) -> ParseResult<Kwarg> {
+        let key = match kwarg.node.arg {
+            Some(key) => Identifier::from_name(key),
+            None => return Err("kwargs with no key".into()),
+        };
+        let value = self.parse_expression(kwarg.node.value)?;
+        Ok(Kwarg { key, value })
+    }
+
+    fn parse_identifier(&self, ast: AstExpr) -> ParseResult<Identifier> {
+        match ast.node {
+            ExprKind::Name { id, .. } => Ok(Identifier::from_name(id)),
+            _ => Err(format!("Expected name, got {:?}", ast.node).into()),
+        }
+    }
+
+    fn convert_range(&self, range: &TextRange) -> CodeRange {
+        CodeRange::new(
+            self.index_to_position(range.start().into()),
+            self.index_to_position(range.end().into()),
+        )
+    }
+
+    fn index_to_position(&self, index: usize) -> CodePosition {
+        for (line, line_end) in self.line_ends.iter().enumerate() {
+            if index <= *line_end {
+                return CodePosition::new(line, index - self.line_ends[line - 1]);
+            }
+        }
+        let len = self.line_ends.len();
+        CodePosition::new(len, index - self.line_ends[len - 1])
+    }
 }
 
 fn first<T: std::fmt::Debug>(v: Vec<T>) -> ParseResult<T> {
@@ -258,13 +305,6 @@ fn first<T: std::fmt::Debug>(v: Vec<T>) -> ParseResult<T> {
         Err(format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into())
     } else {
         v.into_iter().next().ok_or_else(|| "Expected 1 element, got 0".into())
-    }
-}
-
-fn parse_identifier(ast: AstExpr) -> ParseResult<Identifier> {
-    match ast.node {
-        ExprKind::Name { id, .. } => Ok(Identifier::from_name(id)),
-        _ => Err(format!("Expected name, got {:?}", ast.node).into()),
     }
 }
 

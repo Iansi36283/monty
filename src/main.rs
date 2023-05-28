@@ -31,7 +31,13 @@ fn main() -> ExitCode {
     let input_names = vec![];
     let inputs = vec![];
 
-    let ex = Executor::new(&code, file_path, &input_names).unwrap();
+    let ex = match Executor::new(&code, file_path, &input_names) {
+        Ok(ex) => ex,
+        Err(err) => {
+            eprintln!("Error parsing code: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let tic = Instant::now();
     match ex.run(inputs) {
@@ -75,7 +81,7 @@ impl Executor {
         let nodes = parse(code, filename)?;
         // dbg!(&nodes);
         let (initial_namespace, nodes) = prepare(nodes, input_names)?;
-        dbg!(&initial_namespace, &nodes);
+        // dbg!(&initial_namespace, &nodes);
         Ok(Self {
             initial_namespace,
             nodes,

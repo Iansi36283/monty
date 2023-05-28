@@ -1,7 +1,7 @@
+use std::fmt;
+
 use crate::object::Object;
 use crate::prepare::PrepareResult;
-
-use rustpython_parser::ast::TextRange;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Operator {
@@ -23,6 +23,28 @@ pub(crate) enum Operator {
     Or,
 }
 
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Add => write!(f, "+"),
+            Self::Sub => write!(f, "-"),
+            Self::Mult => write!(f, "*"),
+            Self::MatMult => write!(f, "@"),
+            Self::Div => write!(f, "/"),
+            Self::Mod => write!(f, "%"),
+            Self::Pow => write!(f, "**"),
+            Self::LShift => write!(f, "<<"),
+            Self::RShift => write!(f, ">>"),
+            Self::BitOr => write!(f, "|"),
+            Self::BitXor => write!(f, "^"),
+            Self::BitAnd => write!(f, "&"),
+            Self::FloorDiv => write!(f, "//"),
+            Self::And => write!(f, "and"),
+            Self::Or => write!(f, "or"),
+        }
+    }
+}
+
 /// Defined separately since these operators always return a bool
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CmpOperator {
@@ -38,31 +60,83 @@ pub(crate) enum CmpOperator {
     NotIn,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct Position {
-    start: u32,
-    end: u32,
+impl fmt::Display for CmpOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Eq => write!(f, "=="),
+            Self::NotEq => write!(f, "!="),
+            Self::Lt => write!(f, "<"),
+            Self::LtE => write!(f, "<="),
+            Self::Gt => write!(f, ">"),
+            Self::GtE => write!(f, ">="),
+            Self::Is => write!(f, "is"),
+            Self::IsNot => write!(f, "is not"),
+            Self::In => write!(f, "in"),
+            Self::NotIn => write!(f, "not in"),
+        }
+    }
 }
 
-impl Position {
-    pub fn from_range(range: &TextRange) -> Self {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodePosition {
+    line: u32,
+    column: u32,
+}
+
+impl fmt::Display for CodePosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
+}
+
+impl CodePosition {
+    pub fn new(line: usize, column: usize) -> Self {
         Self {
-            start: range.start().into(),
-            end: range.end().into(),
+            line: line as u32,
+            column: column as u32,
         }
     }
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CodeRange {
+    start: CodePosition,
+    end: CodePosition,
+}
+
+impl fmt::Display for CodeRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} - {}", self.start, self.end)
+    }
+}
+
+impl CodeRange {
+    pub fn new(start: CodePosition, end: CodePosition) -> Self {
+        Self { start, end }
+    }
+
+    pub fn extend(&self, end: &CodeRange) -> Self {
+        Self::new(self.start, end.end)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ExprLoc {
-    pub position: Position,
+    pub position: CodeRange,
     pub expr: Expr,
 }
 
+impl fmt::Display for ExprLoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // don't show position as that should be displayed separately
+        write!(f, "{}", self.expr)
+    }
+}
+
 impl ExprLoc {
-    pub fn from_expr(range: &TextRange, expr: Expr) -> Self {
+    pub fn new(position: CodeRange, expr: Expr) -> Self {
         Self {
-            position: Position::from_range(range),
+            position,
             expr,
         }
     }
@@ -90,6 +164,15 @@ pub(crate) struct Kwarg {
 pub(crate) enum Function {
     Builtin(Builtins),
     Ident(Identifier),
+}
+
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Builtin(b) => write!(f, "{}", b),
+            Self::Ident(i) => write!(f, "{}", i.name),
+        }
+    }
 }
 
 impl Function {
@@ -123,6 +206,34 @@ pub(crate) enum Expr {
     },
     #[allow(dead_code)]
     List(Vec<ExprLoc>),
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Constant(object) => write!(f, "{}", object.repr()),
+            Self::Name(identifier) => write!(f, "{}", identifier.name),
+            Self::Call { func, args, kwargs } => {
+                write!(f, "{}(", func)?;
+                for arg in args.iter() {
+                    write!(f, "{}, ", arg)?;
+                }
+                for kwarg in kwargs.iter() {
+                    write!(f, "{}={}, ", kwarg.key.name, kwarg.value)?;
+                }
+                write!(f, ")")
+            }
+            Self::Op { left, op, right } => write!(f, "{} {} {}", left, op, right),
+            Self::CmpOp { left, op, right } => write!(f, "{} {} {}", left, op, right),
+            Self::List(list) => {
+                write!(f, "[")?;
+                for item in list.iter() {
+                    write!(f, "{}, ", item)?;
+                }
+                write!(f, "]")
+            }
+        }
+    }
 }
 
 impl Expr {
@@ -170,6 +281,16 @@ pub(crate) enum Builtins {
     Print,
     Range,
     Len,
+}
+
+impl fmt::Display for Builtins {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Print => write!(f, "print"),
+            Self::Range => write!(f, "range"),
+            Self::Len => write!(f, "len"),
+        }
+    }
 }
 
 impl Builtins {

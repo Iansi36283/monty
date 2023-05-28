@@ -72,7 +72,7 @@ impl Frame {
             };
             match ok {
                 true => Ok(()),
-                false => Err(format!("Cannot apply assign operator {op:?} {object:?}").into()),
+                false => Err(format!("({}) Cannot apply assign operator {op:?} {:?}", object.position, object.expr).into()),
             }
         } else {
             Err(format!("name '{}' is not defined", target.name).into())

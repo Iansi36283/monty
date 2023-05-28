@@ -19,11 +19,11 @@ impl<'a> Evaluator<'a> {
             Expr::Name(ident) => {
                 if let Some(object) = self.namespace.get(ident.id) {
                     match object {
-                        Object::Undefined => Err(format!("name '{}' is not defined", ident.name).into()),
+                        Object::Undefined => Err(format!("({}) name '{}' is not defined", expr_loc.position, ident.name).into()),
                         _ => Ok(Cow::Borrowed(object)),
                     }
                 } else {
-                    Err(format!("name '{}' is not defined", ident.name).into())
+                    Err(format!("({}) name '{}' is not defined", expr_loc.position, ident.name).into())
                 }
             }
             Expr::Call { func, args, kwargs } => self.call_function(func, args, kwargs),
@@ -57,7 +57,7 @@ impl<'a> Evaluator<'a> {
         };
         match op_object {
             Some(object) => Ok(Cow::Owned(object)),
-            None => Err(format!("Cannot apply operator {left:?} {op:?} {right:?}").into()),
+            None => Err(format!("({}) Cannot apply operator {left} {op} {right}", left.position.extend(&right.position)).into()),
         }
     }
 
@@ -71,11 +71,11 @@ impl<'a> Evaluator<'a> {
             CmpOperator::GtE => Some(left_object.ge(&right_object)),
             CmpOperator::Lt => Some(left_object.lt(&right_object)),
             CmpOperator::LtE => Some(left_object.le(&right_object)),
-            _ => return Err(format!("CmpOperator {op:?} not yet implemented").into()),
+            _ => return Err(format!("CmpOperator {op} not yet implemented").into()),
         };
         match op_object {
             Some(object) => Ok(object),
-            None => Err(format!("Cannot apply comparison operator {left:?} {op:?} {right:?}").into()),
+            None => Err(format!("({}) Cannot apply comparison operator {left} {op} {right}", left.position.extend(&right.position)).into()),
         }
     }
 
