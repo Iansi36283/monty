@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::exceptions::{exc_err, Exception};
+use crate::exceptions::{exc_err, Exception, RunError};
 use crate::run::RunResult;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,6 +199,7 @@ impl Object {
         }
     }
 
+    /// replace with TryFrom
     pub fn as_int(&self) -> RunResult<'static, i64> {
         match self {
             Self::Int(i) => Ok(*i),
@@ -223,6 +224,17 @@ impl Object {
             Self::Tuple(_) => "tuple",
             Self::Range(_) => "range",
             Self::Exc(e) => e.type_str(),
+        }
+    }
+}
+
+impl TryFrom<Object> for String {
+    type Error = RunError<'static>;
+
+    fn try_from(object: Object) -> RunResult<'static, Self> {
+        match object {
+            Object::Str(s) => Ok(s),
+            _ => exc_err!(Exception::TypeError; "'{object:?}' object is not a str"),
         }
     }
 }

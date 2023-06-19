@@ -66,6 +66,27 @@ impl Prepare {
                     new_nodes.push(Node::Return(expr));
                 }
                 Node::ReturnNone => new_nodes.push(Node::ReturnNone),
+                Node::Raise(exc) => {
+                    let expr = match exc {
+                        Some(expr) => {
+                            match expr.expr {
+                                Expr::Name(id) => {
+                                    // this is raising an exception type, e.g. `raise TypeError`
+                                    // TODO we need a proper type system here
+                                    let expr = Expr::Call {
+                                        func: Function::Builtin(Builtins::find(&id.name)?),
+                                        args: vec![],
+                                        kwargs: vec![],
+                                    };
+                                    Some(ExprLoc::new(id.position, expr))
+                                }
+                                _ => Some(self.prepare_expression(expr)?),
+                            }
+                        }
+                        None => return exc_err!(ParseError::Internal; "naked `raise` is not yet supported"),
+                    };
+                    new_nodes.push(Node::Raise(expr));
+                }
                 Node::Assign { target, object } => {
                     let object = self.prepare_expression(object)?;
                     let (target, is_new) = self.get_id(target);

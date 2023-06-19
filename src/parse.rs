@@ -125,7 +125,14 @@ impl<'c> Parser<'c> {
                 type_comment: _,
             } => Err(ParseError::Todo("AsyncWith")),
             StmtKind::Match { subject: _, cases: _ } => Err(ParseError::Todo("Match")),
-            StmtKind::Raise { exc: _, cause: _ } => Err(ParseError::Todo("Raise")),
+            StmtKind::Raise { exc, cause: _ } => {
+                // TODO add cause to Node::Raise
+                let expr = match exc {
+                    Some(expr) => Some(self.parse_expression(*expr)?),
+                    None => None,
+                };
+                Ok(Node::Raise(expr))
+            }
             StmtKind::Try {
                 body: _,
                 handlers: _,

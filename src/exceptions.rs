@@ -92,7 +92,7 @@ pub(crate) use exc_err;
 
 #[derive(Debug, Clone)]
 pub struct ExceptionRaise<'c> {
-    pub(crate) exc: Exception,
+    pub exc: Exception,
     // first in vec is closes "bottom" frame
     pub(crate) frame: Option<StackFrame<'c>>,
 }

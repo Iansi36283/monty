@@ -42,6 +42,7 @@ impl<'c> RunFrame<'c> {
             }
             Node::Return(expr) => return Ok(Some(Exit::Return(self.execute_expr(expr)?.into_owned()))),
             Node::ReturnNone => return Ok(Some(Exit::ReturnNone)),
+            Node::Raise(exc) => self.raise(exc)?,
             Node::Assign { target, object } => {
                 self.assign(target, object)?;
             }
@@ -80,12 +81,26 @@ impl<'c> RunFrame<'c> {
         }
     }
 
+    fn raise(&self, op_exc_expr: &Option<ExprLoc<'c>>) -> RunResult<'c, ()> {
+        if let Some(exc_expr) = op_exc_expr {
+            let object = self.execute_expr(exc_expr)?;
+            let exc = match object.into_owned() {
+                Object::Exc(exc) => exc,
+                _ => return exc_err!(Exception::TypeError; "exceptions must derive from BaseException"),
+            };
+            Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into())
+        } else {
+            exc_err!(InternalRunError::TodoError; "plain raise not yet supported")
+        }
+    }
+
     fn assign(&mut self, target: &Identifier<'c>, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
         self.namespace[target.id] = self.execute_expr(expr)?.into_owned();
         Ok(())
     }
 
     fn op_assign(&mut self, target: &Identifier<'c>, op: &Operator, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
+        // TODO ideally we wouldn't need to clone here since add_mut could take a cow
         let right_object = self.execute_expr(expr)?.into_owned();
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {

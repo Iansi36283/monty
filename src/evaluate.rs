@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use crate::builtins::Builtins;
 use crate::exceptions::exc_err;
 use crate::exceptions::{Exception, InternalRunError};
 use crate::object::Object;
@@ -95,7 +94,7 @@ impl<'d> Evaluator<'d> {
         &self,
         function: &'d Function,
         args: &'d [ExprLoc<'c>],
-        _kwargs: &'d [Kwarg],
+        kwargs: &'d [Kwarg],
     ) -> RunResult<'c, Cow<'d, Object>> {
         let builtin = match function {
             Function::Builtin(builtin) => builtin,
@@ -103,39 +102,6 @@ impl<'d> Evaluator<'d> {
                 return exc_err!(InternalRunError::TodoError; "User defined functions not yet implemented")
             }
         };
-        match builtin {
-            Builtins::Print => {
-                for (i, arg) in args.iter().enumerate() {
-                    let object = self.evaluate(arg)?;
-                    if i == 0 {
-                        print!("{object}");
-                    } else {
-                        print!(" {object}");
-                    }
-                }
-                println!();
-                Ok(Cow::Owned(Object::None))
-            }
-            Builtins::Range => {
-                if args.len() != 1 {
-                    exc_err!(InternalRunError::TodoError; "range() takes exactly one argument")
-                } else {
-                    let object = self.evaluate(&args[0])?;
-                    let size = object.as_int()?;
-                    Ok(Cow::Owned(Object::Range(size)))
-                }
-            }
-            Builtins::Len => {
-                if args.len() != 1 {
-                    exc_err!(Exception::TypeError; "len() takes exactly exactly one argument ({} given)", args.len())
-                } else {
-                    let object = self.evaluate(&args[0])?;
-                    match object.len() {
-                        Some(len) => Ok(Cow::Owned(Object::Int(len as i64))),
-                        None => exc_err!(Exception::TypeError; "Object of type {} has no len()", object),
-                    }
-                }
-            }
-        }
+        builtin.call_function(self, args, kwargs)
     }
 }

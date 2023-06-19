@@ -146,6 +146,7 @@ pub(crate) enum Node<'c> {
     Expr(ExprLoc<'c>),
     Return(ExprLoc<'c>),
     ReturnNone,
+    Raise(Option<ExprLoc<'c>>),
     Assign {
         target: Identifier<'c>,
         object: ExprLoc<'c>,
