@@ -17,7 +17,6 @@ macro_rules! parse_error_tests {
 }
 
 parse_error_tests! {
-    add_int_str: "1 + '1'", "Exc: (1-1 to 1-8) TypeError: unsupported operand type(s) for +: 'int' and 'str'";
     complex: "1+2j", "TODO: complex constants";
 }
 
@@ -91,4 +90,6 @@ execute_raise_tests! {
     error_no_args: "raise TypeError()", "TypeError()";
     // language=Python
     error_two_args: "raise ValueError('x', 1 + 2)", "ValueError('x', 3)";
+    // language=Python (constant folding removed, so mixed-type add errors at runtime)
+    add_int_str: "1 + '1'", "TypeError('unsupported operand type(s) for +: 'int' and 'str'')";
 }

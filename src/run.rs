@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::evaluate::{evaluate, evaluate_bool};
 use crate::exceptions::{exc, exc_err, internal_err, ExcType, Exception, InternalRunError, RunError, StackFrame};
 use crate::expressions::{Exit, ExprLoc, Identifier, Node};
+use crate::heap::Heap;
 use crate::object::Object;
 use crate::operators::Operator;
 use crate::parse::CodeRange;
@@ -25,44 +26,44 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    pub fn execute(&mut self, nodes: &[Node<'c>]) -> RunResult<'c, Exit<'c>> {
+    pub fn execute(&mut self, heap: &mut Heap, nodes: &[Node<'c>]) -> RunResult<'c, Exit<'c>> {
         for node in nodes {
-            if let Some(leave) = self.execute_node(node)? {
+            if let Some(leave) = self.execute_node(heap, node)? {
                 return Ok(leave);
             }
         }
         Ok(Exit::ReturnNone)
     }
 
-    fn execute_node(&mut self, node: &Node<'c>) -> RunResult<'c, Option<Exit<'c>>> {
+    fn execute_node(&mut self, heap: &mut Heap, node: &Node<'c>) -> RunResult<'c, Option<Exit<'c>>> {
         match node {
             Node::Pass => return internal_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
             Node::Expr(expr) => {
-                self.execute_expr(expr)?;
+                self.execute_expr(heap, expr)?;
             }
-            Node::Return(expr) => return Ok(Some(Exit::Return(self.execute_expr(expr)?.into_owned()))),
+            Node::Return(expr) => return Ok(Some(Exit::Return(self.execute_expr(heap, expr)?.into_owned()))),
             Node::ReturnNone => return Ok(Some(Exit::ReturnNone)),
-            Node::Raise(exc) => self.raise(exc.as_ref())?,
+            Node::Raise(exc) => self.raise(heap, exc.as_ref())?,
             Node::Assign { target, object } => {
-                self.assign(target, object)?;
+                self.assign(heap, target, object)?;
             }
             Node::OpAssign { target, op, object } => {
-                self.op_assign(target, op, object)?;
+                self.op_assign(heap, target, op, object)?;
             }
             Node::For {
                 target,
                 iter,
                 body,
                 or_else,
-            } => self.for_loop(target, iter, body, or_else)?,
-            Node::If { test, body, or_else } => self.if_(test, body, or_else)?,
+            } => self.for_loop(heap, target, iter, body, or_else)?,
+            Node::If { test, body, or_else } => self.if_(heap, test, body, or_else)?,
         }
         Ok(None)
     }
 
-    fn execute_expr<'d>(&'d mut self, expr: &'d ExprLoc<'c>) -> RunResult<'c, Cow<'d, Object>> {
+    fn execute_expr<'d>(&'d mut self, heap: &'d mut Heap, expr: &'d ExprLoc<'c>) -> RunResult<'c, Cow<'d, Object>> {
         // it seems the struct creation is optimized away, and has no cost
-        match evaluate(&mut self.namespace, expr) {
+        match evaluate(&mut self.namespace, heap, expr) {
             Ok(object) => Ok(object),
             Err(mut e) => {
                 set_name(self.name, &mut e);
@@ -71,8 +72,8 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn execute_expr_bool(&mut self, expr: &ExprLoc<'c>) -> RunResult<'c, bool> {
-        match evaluate_bool(&mut self.namespace, expr) {
+    fn execute_expr_bool(&mut self, heap: &mut Heap, expr: &ExprLoc<'c>) -> RunResult<'c, bool> {
+        match evaluate_bool(&mut self.namespace, heap, expr) {
             Ok(object) => Ok(object),
             Err(mut e) => {
                 set_name(self.name, &mut e);
@@ -81,9 +82,9 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn raise(&mut self, op_exc_expr: Option<&ExprLoc<'c>>) -> RunResult<'c, ()> {
+    fn raise(&mut self, heap: &mut Heap, op_exc_expr: Option<&ExprLoc<'c>>) -> RunResult<'c, ()> {
         if let Some(exc_expr) = op_exc_expr {
-            let object = self.execute_expr(exc_expr)?;
+            let object = self.execute_expr(heap, exc_expr)?;
             match object.into_owned() {
                 Object::Exc(exc) => Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into()),
                 _ => exc_err!(ExcType::TypeError; "exceptions must derive from BaseException"),
@@ -93,14 +94,20 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn assign(&mut self, target: &Identifier<'c>, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
-        self.namespace[target.id] = self.execute_expr(expr)?.into_owned();
+    fn assign(&mut self, heap: &mut Heap, target: &Identifier<'c>, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
+        self.namespace[target.id] = self.execute_expr(heap, expr)?.into_owned();
         Ok(())
     }
 
-    fn op_assign(&mut self, target: &Identifier<'c>, op: &Operator, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
+    fn op_assign(
+        &mut self,
+        heap: &mut Heap,
+        target: &Identifier<'c>,
+        op: &Operator,
+        expr: &ExprLoc<'c>,
+    ) -> RunResult<'c, ()> {
         // TODO ideally we wouldn't need to clone here since add_mut could take a cow
-        let right_object = self.execute_expr(expr)?.into_owned();
+        let right_object = self.execute_expr(heap, expr)?.into_owned();
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {
                 Operator::Add => target_object.add_mut(right_object),
@@ -122,28 +129,35 @@ impl<'c> RunFrame<'c> {
 
     fn for_loop(
         &mut self,
+        heap: &mut Heap,
         target: &Identifier,
         iter: &ExprLoc<'c>,
         body: &[Node<'c>],
         _or_else: &[Node<'c>],
     ) -> RunResult<'c, ()> {
-        let range_size = match self.execute_expr(iter)?.as_ref() {
+        let range_size = match self.execute_expr(heap, iter)?.as_ref() {
             Object::Range(s) => *s,
             _ => return internal_err!(InternalRunError::TodoError; "`for` iter must be a range"),
         };
 
         for object in 0i64..range_size {
             self.namespace[target.id] = Object::Int(object);
-            self.execute(body)?;
+            self.execute(heap, body)?;
         }
         Ok(())
     }
 
-    fn if_<'d>(&mut self, test: &'d ExprLoc<'c>, body: &'d [Node<'c>], or_else: &'d [Node<'c>]) -> RunResult<'c, ()> {
-        if self.execute_expr_bool(test)? {
-            self.execute(body)?;
+    fn if_<'d>(
+        &mut self,
+        heap: &mut Heap,
+        test: &'d ExprLoc<'c>,
+        body: &'d [Node<'c>],
+        or_else: &'d [Node<'c>],
+    ) -> RunResult<'c, ()> {
+        if self.execute_expr_bool(heap, test)? {
+            self.execute(heap, body)?;
         } else {
-            self.execute(or_else)?;
+            self.execute(heap, or_else)?;
         }
         Ok(())
     }

@@ -2,12 +2,18 @@ use std::borrow::Cow;
 
 use crate::exceptions::{internal_err, ExcType, Exception, InternalRunError};
 use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg};
+use crate::heap::Heap;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::run::RunResult;
 
+/// Evaluates an expression node and returns a value backed by the shared heap.
+///
+/// `namespace` provides the current frame bindings, while `heap` is threaded so any
+/// future heap-backed objects can be created/cloned without re-threading plumbing later.
 pub(crate) fn evaluate<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     expr_loc: &'d ExprLoc<'c>,
 ) -> RunResult<'c, Cow<'d, Object>> {
     match &expr_loc.expr {
@@ -26,41 +32,48 @@ pub(crate) fn evaluate<'c, 'd>(
                     .into())
             }
         }
-        Expr::Call { func, args, kwargs } => Ok(call_function(namespace, func, args, kwargs)?),
+        Expr::Call { func, args, kwargs } => Ok(call_function(namespace, heap, func, args, kwargs)?),
         Expr::AttrCall {
             object,
             attr,
             args,
             kwargs,
-        } => Ok(attr_call(namespace, expr_loc, object, attr, args, kwargs)?),
+        } => Ok(attr_call(namespace, heap, expr_loc, object, attr, args, kwargs)?),
         // Expr::AttrCall { .. } => todo!(),
-        Expr::Op { left, op, right } => eval_op(namespace, left, op, right),
-        Expr::CmpOp { left, op, right } => Ok(Cow::Owned(cmp_op(namespace, left, op, right)?.into())),
+        Expr::Op { left, op, right } => eval_op(namespace, heap, left, op, right),
+        Expr::CmpOp { left, op, right } => Ok(Cow::Owned(cmp_op(namespace, heap, left, op, right)?.into())),
         Expr::List(elements) => {
             let objects = elements
                 .iter()
-                .map(|e| evaluate(namespace, e).map(std::borrow::Cow::into_owned))
+                .map(|e| evaluate(namespace, heap, e).map(std::borrow::Cow::into_owned))
                 .collect::<RunResult<_>>()?;
             Ok(Cow::Owned(Object::List(objects)))
         }
     }
 }
 
-pub(crate) fn evaluate_bool<'c, 'd>(namespace: &'d mut [Object], expr_loc: &'d ExprLoc<'c>) -> RunResult<'c, bool> {
+/// Specialized helper for truthiness checks; shares implementation with `evaluate`.
+pub(crate) fn evaluate_bool<'c, 'd>(
+    namespace: &'d mut [Object],
+    heap: &'d mut Heap,
+    expr_loc: &'d ExprLoc<'c>,
+) -> RunResult<'c, bool> {
     match &expr_loc.expr {
-        Expr::CmpOp { left, op, right } => cmp_op(namespace, left, op, right),
-        _ => Ok(evaluate(namespace, expr_loc)?.as_ref().bool()),
+        Expr::CmpOp { left, op, right } => cmp_op(namespace, heap, left, op, right),
+        _ => Ok(evaluate(namespace, heap, expr_loc)?.as_ref().bool()),
     }
 }
 
+/// Evaluates a binary operator expression (`+, -, %`, etc.).
 fn eval_op<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     left: &'d ExprLoc<'c>,
     op: &'d Operator,
     right: &'d ExprLoc<'c>,
 ) -> RunResult<'c, Cow<'d, Object>> {
-    let left_object = evaluate(namespace, left)?.into_owned();
-    let right_object = evaluate(namespace, right)?;
+    let left_object = evaluate(namespace, heap, left)?.into_owned();
+    let right_object = evaluate(namespace, heap, right)?;
     let op_object: Option<Object> = match op {
         Operator::Add => left_object.add(&right_object),
         Operator::Sub => left_object.sub(&right_object),
@@ -73,14 +86,16 @@ fn eval_op<'c, 'd>(
     }
 }
 
+/// Evaluates comparison operators, reusing `evaluate` so heap semantics remain consistent.
 fn cmp_op<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     left: &'d ExprLoc<'c>,
     op: &'d CmpOperator,
     right: &'d ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
-    let left_object = evaluate(namespace, left)?.into_owned();
-    let right_object = evaluate(namespace, right)?;
+    let left_object = evaluate(namespace, heap, left)?.into_owned();
+    let right_object = evaluate(namespace, heap, right)?;
     let left_cow: Cow<Object> = Cow::Owned(left_object);
     match op {
         CmpOperator::Eq => Ok(left_cow.as_ref().py_eq(&right_object)),
@@ -97,8 +112,10 @@ fn cmp_op<'c, 'd>(
     }
 }
 
+/// Evaluates builtin function calls, collecting argument values via the shared heap.
 fn call_function<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     function: &'d Function,
     args: &'d [ExprLoc<'c>],
     _kwargs: &'d [Kwarg],
@@ -111,13 +128,15 @@ fn call_function<'c, 'd>(
     };
     let args: Vec<Cow<Object>> = args
         .iter()
-        .map(|a| evaluate(namespace, a).map(|o| Cow::Owned(o.into_owned())))
+        .map(|a| evaluate(namespace, heap, a).map(|o| Cow::Owned(o.into_owned())))
         .collect::<RunResult<_>>()?;
     builtin.call_function(args)
 }
 
+/// Handles attribute method calls like `list.append`, again threading the heap for safety.
 fn attr_call<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     expr_loc: &'d ExprLoc<'c>,
     object_ident: &Identifier<'c>,
     attr: &Attr,
@@ -127,7 +146,7 @@ fn attr_call<'c, 'd>(
     // Evaluate arguments first to avoid borrow conflicts
     let args: Vec<Cow<Object>> = args
         .iter()
-        .map(|a| evaluate(namespace, a).map(|o| Cow::Owned(o.into_owned())))
+        .map(|a| evaluate(namespace, heap, a).map(|o| Cow::Owned(o.into_owned())))
         .collect::<RunResult<_>>()?;
 
     let object = if let Some(object) = namespace.get_mut(object_ident.id) {

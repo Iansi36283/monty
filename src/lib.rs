@@ -46,12 +46,13 @@ impl<'c> Executor<'c> {
     }
 
     pub fn run(&self, inputs: Vec<Object>) -> Result<Exit<'c>, InternalRunError> {
-        self.heap.borrow_mut().clear();
         let mut namespace = self.initial_namespace.clone();
         for (i, input) in inputs.into_iter().enumerate() {
             namespace[i] = input;
         }
-        match RunFrame::new(namespace).execute(&self.nodes) {
+        let mut heap = self.heap.borrow_mut();
+        heap.clear();
+        match RunFrame::new(namespace).execute(&mut heap, &self.nodes) {
             Ok(v) => Ok(v),
             Err(e) => match e {
                 RunError::Exc(exc) => Ok(Exit::Raise(exc)),
