@@ -4,6 +4,7 @@ use crate::heap::Heap;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::run::RunResult;
+use crate::types::List;
 use crate::HeapData;
 
 /// Evaluates an expression node and returns a value.
@@ -45,7 +46,7 @@ pub(crate) fn evaluate_use<'c, 'd>(
                 .iter()
                 .map(|e| evaluate_use(namespace, heap, e))
                 .collect::<RunResult<_>>()?;
-            let object_id = heap.allocate(HeapData::List(objects));
+            let object_id = heap.allocate(HeapData::List(List::from_vec(objects)));
             Ok(Object::Ref(object_id))
         }
         Expr::Tuple(elements) => {
@@ -220,5 +221,5 @@ fn attr_call<'c, 'd>(
             .with_position(expr_loc.position)
             .into());
     };
-    object.attr_call(heap, attr, args)
+    object.call_attr(heap, attr, args)
 }

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::expressions::ExprLoc;
-use crate::object::{string_repr, Object};
+use crate::object::{string_repr, Attr, Object};
 use crate::parse::CodeRange;
 use crate::run::RunResult;
 use crate::Heap;
@@ -32,6 +32,12 @@ impl ExcType {
             Self::NameError => "NameError",
             Self::AttributeError => "AttributeError",
         }
+    }
+}
+
+impl ExcType {
+    pub fn attribute_error<'c>(type_str: &str, attr: &Attr) -> RunError<'c> {
+        exc_fmt!(Self::AttributeError; "'{type_str}' object has no attribute '{attr}'").into()
     }
 }
 

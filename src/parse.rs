@@ -7,7 +7,6 @@ use rustpython_parser::ast::{
 use rustpython_parser::parse_program;
 
 use crate::expressions::{Const, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
-use crate::object::Attr;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
 
@@ -251,12 +250,11 @@ impl<'c> Parser<'c> {
                     }
                     ExprKind::Attribute { value, attr, ctx: _ } => {
                         let object = self.parse_identifier(*value)?;
-                        let attr = Attr::find(&attr)?;
                         Ok(ExprLoc::new(
                             position,
                             Expr::AttrCall {
                                 object,
-                                attr,
+                                attr: attr.into(),
                                 args,
                                 kwargs,
                             },

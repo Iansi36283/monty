@@ -1,4 +1,7 @@
-use crate::object::Object;
+use crate::exceptions::ExcType;
+use crate::object::{Attr, Object};
+use crate::run::RunResult;
+use crate::types::List;
 
 /// Unique identifier for objects stored inside the heap arena.
 pub type ObjectId = usize;
@@ -11,7 +14,7 @@ pub enum HeapData {
     Object(Box<Object>),
     Str(String),
     Bytes(Vec<u8>),
-    List(Vec<Object>),
+    List(List),
     Tuple(Vec<Object>),
     // TODO: support arbitrary classes
 }
@@ -36,13 +39,19 @@ impl HeapData {
             (Self::Object(obj1), Self::Object(obj2)) => obj1.py_eq(obj2, heap),
             (Self::Str(s1), Self::Str(s2)) => s1 == s2,
             (Self::Bytes(b1), Self::Bytes(b2)) => b1 == b2,
-            (Self::List(elements1), Self::List(elements2)) => {
-                elements1.len() == elements2.len() && elements1.iter().zip(elements2).all(|(i1, i2)| i1.py_eq(i2, heap))
-            }
+            (Self::List(list1), Self::List(list2)) => list1.py_eq(list2, heap),
             (Self::Tuple(elements1), Self::Tuple(elements2)) => {
                 elements1.len() == elements2.len() && elements1.iter().zip(elements2).all(|(i1, i2)| i1.py_eq(i2, heap))
             }
             _ => false,
+        }
+    }
+
+    /// Calls an attribute method on this object (e.g., list.append()).
+    pub fn call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
+        match self {
+            Self::List(list) => list.call_attr(heap, attr, args),
+            _ => Err(ExcType::attribute_error(self.type_str(heap), attr)),
         }
     }
 }
@@ -136,6 +145,21 @@ impl Heap {
             .data
     }
 
+    /// Calls an attribute on the heap object at `id` while temporarily taking ownership
+    /// of its payload so we can borrow the heap again inside the call. This avoids the
+    /// borrow checker conflict that arises when attribute implementations also need
+    /// mutable access to the heap (e.g. for refcounting).
+    pub fn call_attr<'c>(&mut self, id: ObjectId, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
+        let mut entry = {
+            let slot = self.objects.get_mut(id).expect("Heap::call_attr: slot missing");
+            slot.take().expect("Heap::call_attr: object already freed")
+        };
+        let result = entry.data.call_attr(self, attr, args);
+        let slot = self.objects.get_mut(id).expect("Heap::call_attr: slot missing");
+        *slot = Some(entry);
+        result
+    }
+
     /// Removes all objects and resets the ID counter, used between executor runs.
     pub fn clear(&mut self) {
         self.objects.clear();
@@ -152,7 +176,8 @@ fn enqueue_children(data: &HeapData, stack: &mut Vec<ObjectId>) {
                 stack.push(*id);
             }
         }
-        HeapData::List(items) | HeapData::Tuple(items) => {
+        HeapData::List(list) => list.push_stack_ids(stack),
+        HeapData::Tuple(items) => {
             // Walk through all items and enqueue any heap-allocated objects
             for obj in items {
                 if let Object::Ref(id) = obj {

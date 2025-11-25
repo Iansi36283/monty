@@ -6,7 +6,6 @@ use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
 use crate::heap::HeapData;
 use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
-use crate::{ParseError, ParseResult};
 
 /// Primary value type representing Python objects at runtime.
 ///
@@ -80,15 +79,15 @@ impl Object {
                     }
                     (HeapData::List(list1), HeapData::List(list2)) => {
                         // Clone the first list's items and extend with second list
-                        let mut result = list1.clone();
-                        result.extend_from_slice(list2);
+                        let mut result = list1.as_vec().clone();
+                        result.extend_from_slice(list2.as_vec());
                         // Inc ref for all items in result (they're now referenced twice)
                         for obj in &result {
                             if let Self::Ref(id) = obj {
                                 heap.inc_ref(*id);
                             }
                         }
-                        let id = heap.allocate(HeapData::List(result));
+                        let id = heap.allocate(HeapData::List(crate::types::List::from_vec(result)));
                         Some(Self::Ref(id))
                     }
                     _ => None,
@@ -129,11 +128,12 @@ impl Object {
                         if let HeapData::List(mut list2) = data2 {
                             // Collect IDs to inc_ref after releasing the borrow
                             let ids_to_inc: Vec<ObjectId> = list2
+                                .as_vec()
                                 .iter()
                                 .filter_map(|obj| if let Self::Ref(id) = obj { Some(*id) } else { None })
                                 .collect();
                             // Extend list1 with list2 items by appending them individually
-                            list1.append(&mut list2);
+                            list1.as_vec_mut().append(list2.as_vec_mut());
                             // Release the mutable borrow
                             let _ = list1;
                             // Now inc_ref for all heap objects
@@ -200,7 +200,7 @@ impl Object {
                 HeapData::Object(obj) => obj.as_ref().bool(heap),
                 HeapData::Str(s) => !s.is_empty(),
                 HeapData::Bytes(b) => !b.is_empty(),
-                HeapData::List(items) => !items.is_empty(),
+                HeapData::List(list) => !list.is_empty(),
                 HeapData::Tuple(items) => !items.is_empty(),
             },
         }
@@ -242,7 +242,7 @@ impl Object {
                 HeapData::Object(obj) => obj.as_ref().len(heap),
                 HeapData::Str(s) => Some(s.len()),
                 HeapData::Bytes(b) => Some(b.len()),
-                HeapData::List(items) => Some(items.len()),
+                HeapData::List(list) => Some(list.len()),
                 HeapData::Tuple(items) => Some(items.len()),
             },
             _ => None,
@@ -260,7 +260,7 @@ impl Object {
                 HeapData::Object(obj) => obj.as_ref().repr(heap),
                 HeapData::Str(s) => string_repr(s).into(),
                 HeapData::Bytes(b) => format!("b'{b:?}'").into(),
-                HeapData::List(items) => repr_sequence('[', ']', items, heap).into(),
+                HeapData::List(list) => repr_sequence('[', ']', list.as_vec(), heap).into(),
                 HeapData::Tuple(items) => repr_sequence('(', ')', items, heap).into(),
             },
             _ => self.cow_str(),
@@ -351,78 +351,11 @@ impl Object {
     ///
     /// This method requires heap access to work with heap-allocated objects and
     /// to generate accurate error messages.
-    pub fn attr_call<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Self>) -> RunResult<'c, Object> {
-        use crate::heap::HeapData;
-
-        match (self, attr) {
-            // Heap-allocated list support
-            (Self::Ref(id), Attr::Append) => {
-                let obj_id = *id; // Copy the ID to avoid borrow issues
-                if let HeapData::List(list) = heap.get_mut(obj_id) {
-                    if args.len() == 1 {
-                        let item = args[0].clone();
-                        // Store the item_id if it's a Ref, to inc_ref after releasing the borrow
-                        let item_id_opt = if let Self::Ref(item_id) = &item {
-                            Some(*item_id)
-                        } else {
-                            None
-                        };
-                        list.push(item);
-                        // Release the mutable borrow before calling inc_ref
-                        let _ = list;
-                        if let Some(item_id) = item_id_opt {
-                            heap.inc_ref(item_id);
-                        }
-                        Ok(Self::None)
-                    } else {
-                        exc_err_fmt!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
-                    }
-                } else {
-                    let type_str = Self::Ref(obj_id).type_str(heap);
-                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
-                }
-            }
-            (Self::Ref(id), Attr::Insert) => {
-                let obj_id = *id; // Copy the ID to avoid borrow issues
-                if let HeapData::List(list) = heap.get_mut(obj_id) {
-                    if args.len() == 2 {
-                        let index = args[0].as_int()? as usize;
-                        let item = args[1].clone();
-                        // Store the item_id if it's a Ref, to inc_ref after releasing the borrow
-                        let item_id_opt = if let Self::Ref(item_id) = &item {
-                            Some(*item_id)
-                        } else {
-                            None
-                        };
-                        list.insert(index, item);
-                        // Release the mutable borrow before calling inc_ref
-                        let _ = list;
-                        if let Some(item_id) = item_id_opt {
-                            heap.inc_ref(item_id);
-                        }
-                        Ok(Self::None)
-                    } else {
-                        exc_err_fmt!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())
-                    }
-                } else {
-                    let type_str = Self::Ref(obj_id).type_str(heap);
-                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
-                }
-            }
-            (Self::Ref(id), Attr::Foobar) => {
-                let id = *id;
-                if let HeapData::List(list) = heap.get(id) {
-                    Ok(Object::Int(list.len() as i64))
-                } else {
-                    let type_str = Self::Ref(id).type_str(heap);
-                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
-                }
-            }
-
-            (s, _) => {
-                let type_str = s.type_str(heap);
-                exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
-            }
+    pub fn call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Self>) -> RunResult<'c, Object> {
+        if let Self::Ref(id) = self {
+            heap.call_attr(*id, attr, args)
+        } else {
+            Err(ExcType::attribute_error(self.type_str(heap), attr))
         }
     }
 
@@ -501,7 +434,7 @@ impl Object {
 pub enum Attr {
     Append,
     Insert,
-    Foobar,
+    Other(String),
 }
 
 impl fmt::Display for Attr {
@@ -510,19 +443,17 @@ impl fmt::Display for Attr {
         match self {
             Self::Append => write!(f, "append"),
             Self::Insert => write!(f, "insert"),
-            Self::Foobar => write!(f, "foobar"),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }
 
-impl Attr {
-    // TODO replace with a strum
-    pub fn find(name: &str) -> ParseResult<'static, Self> {
-        match name {
-            "append" => Ok(Self::Append),
-            "insert" => Ok(Self::Insert),
-            "foobar" => Ok(Self::Foobar),
-            _ => Err(ParseError::Internal(format!("unknown attribute: `{name}`").into())),
+impl From<String> for Attr {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "append" => Self::Append,
+            "insert" => Self::Insert,
+            _ => Self::Other(name),
         }
     }
 }
