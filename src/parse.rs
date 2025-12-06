@@ -2,6 +2,7 @@ use std::{borrow::Cow, fmt};
 
 use ruff_python_ast::{
     self as ast, BoolOp, CmpOp, ElifElseClause, Expr as AstExpr, Keyword, Number, Operator as AstOperator, Stmt,
+    UnaryOp,
 };
 use ruff_python_parser::parse_module;
 use ruff_text_size::TextRange;
@@ -247,20 +248,29 @@ impl<'c> Parser<'c> {
     fn parse_expression(&self, expression: AstExpr) -> Result<ExprLoc<'c>, ParseError<'c>> {
         match expression {
             AstExpr::BoolOp(ast::ExprBoolOp { op, values, range, .. }) => {
-                if values.len() != 2 {
-                    return Err(ParseError::Todo("BoolOp must have 2 values"));
+                // Handle chained boolean operations like `a and b and c` by right-folding
+                // into nested binary operations: `a and (b and c)`
+                let rust_op = convert_bool_op(op);
+                let position = self.convert_range(range);
+                let mut values_iter = values.into_iter().rev();
+
+                // Start with the rightmost value
+                let last_value = values_iter.next().expect("Expected at least one value in boolean op");
+                let mut result = self.parse_expression(last_value)?;
+
+                // Fold from right to left
+                for value in values_iter {
+                    let left = Box::new(self.parse_expression(value)?);
+                    result = ExprLoc::new(
+                        position,
+                        Expr::Op {
+                            left,
+                            op: rust_op.clone(),
+                            right: Box::new(result),
+                        },
+                    );
                 }
-                let mut values = values.into_iter();
-                let left = Box::new(self.parse_expression(values.next().unwrap())?);
-                let right = Box::new(self.parse_expression(values.next().unwrap())?);
-                Ok(ExprLoc {
-                    position: self.convert_range(range),
-                    expr: Expr::Op {
-                        left,
-                        op: convert_bool_op(op),
-                        right,
-                    },
-                })
+                Ok(result)
             }
             AstExpr::Named(_) => Err(ParseError::Todo("NamedExpr")),
             AstExpr::BinOp(ast::ExprBinOp {
@@ -277,7 +287,13 @@ impl<'c> Parser<'c> {
                     },
                 })
             }
-            AstExpr::UnaryOp(_) => Err(ParseError::Todo("UnaryOp")),
+            AstExpr::UnaryOp(ast::ExprUnaryOp { op, operand, range, .. }) => match op {
+                UnaryOp::Not => {
+                    let operand = Box::new(self.parse_expression(*operand)?);
+                    Ok(ExprLoc::new(self.convert_range(range), Expr::Not(operand)))
+                }
+                _ => Err(ParseError::Todo("UnaryOp other than Not")),
+            },
             AstExpr::Lambda(_) => Err(ParseError::Todo("Lambda")),
             AstExpr::If(_) => Err(ParseError::Todo("IfExp")),
             AstExpr::Dict(ast::ExprDict { items, range, .. }) => {

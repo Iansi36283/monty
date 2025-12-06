@@ -28,7 +28,13 @@ pub(crate) fn evaluate_use<'c, 'e>(
             callable.call(namespace, heap, args)
         }
         Expr::AttrCall { object, attr, args } => Ok(attr_call(namespace, heap, object, attr, args)?),
-        Expr::Op { left, op, right } => eval_op(namespace, heap, left, op, right),
+        Expr::Op { left, op, right } => match op {
+            // Handle boolean operators with short-circuit evaluation.
+            // These return the actual operand value, not a boolean.
+            Operator::And => eval_and(namespace, heap, left, right),
+            Operator::Or => eval_or(namespace, heap, left, right),
+            _ => eval_op(namespace, heap, left, op, right),
+        },
         Expr::CmpOp { left, op, right } => Ok(cmp_op(namespace, heap, left, op, right)?.into()),
         Expr::List(elements) => {
             let objects = elements
@@ -66,6 +72,12 @@ pub(crate) fn evaluate_use<'c, 'e>(
             let dict_id = heap.allocate(HeapData::Dict(dict));
             Ok(Object::Ref(dict_id))
         }
+        Expr::Not(operand) => {
+            let val = evaluate_use(namespace, heap, operand)?;
+            let result = !val.py_bool(heap);
+            val.drop_with_heap(heap);
+            Ok(Object::Bool(result))
+        }
     }
 }
 
@@ -88,7 +100,16 @@ pub(crate) fn evaluate_discard<'c, 'e>(
             Ok(())
         }
         Expr::AttrCall { object, attr, args } => attr_call(namespace, heap, object, attr, args).map(|_| ()),
-        Expr::Op { left, op, right } => eval_op(namespace, heap, left, op, right).map(|_| ()),
+        Expr::Op { left, op, right } => {
+            // Handle and/or with short-circuit evaluation
+            let result = match op {
+                Operator::And => eval_and(namespace, heap, left, right)?,
+                Operator::Or => eval_or(namespace, heap, left, right)?,
+                _ => eval_op(namespace, heap, left, op, right)?,
+            };
+            result.drop_with_heap(heap);
+            Ok(())
+        }
         Expr::CmpOp { left, op, right } => cmp_op(namespace, heap, left, op, right).map(|_| ()),
         Expr::List(elements) => {
             for el in elements {
@@ -114,6 +135,10 @@ pub(crate) fn evaluate_discard<'c, 'e>(
             }
             Ok(())
         }
+        Expr::Not(operand) => {
+            evaluate_discard(namespace, heap, operand)?;
+            Ok(())
+        }
     }
 }
 
@@ -123,14 +148,33 @@ pub(crate) fn evaluate_bool<'c, 'e>(
     heap: &mut Heap<'c, 'e>,
     expr_loc: &'e ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
-    if let Expr::CmpOp { left, op, right } = &expr_loc.expr {
-        cmp_op(namespace, heap, left, op, right)
-    } else {
-        let obj = evaluate_use(namespace, heap, expr_loc)?;
-        let result = obj.py_bool(heap);
-        // Drop temporary reference
-        obj.drop_with_heap(heap);
-        Ok(result)
+    match &expr_loc.expr {
+        Expr::CmpOp { left, op, right } => cmp_op(namespace, heap, left, op, right),
+        // Optimize `not` to avoid creating intermediate Object::Bool
+        Expr::Not(operand) => {
+            let val = evaluate_use(namespace, heap, operand)?;
+            let result = !val.py_bool(heap);
+            val.drop_with_heap(heap);
+            Ok(result)
+        }
+        // Optimize `and`/`or` with short-circuit and direct boolean conversion
+        Expr::Op { left, op, right } if matches!(op, Operator::And | Operator::Or) => {
+            let result = match op {
+                Operator::And => eval_and(namespace, heap, left, right)?,
+                Operator::Or => eval_or(namespace, heap, left, right)?,
+                _ => unreachable!(),
+            };
+            let bool_result = result.py_bool(heap);
+            result.drop_with_heap(heap);
+            Ok(bool_result)
+        }
+        _ => {
+            let obj = evaluate_use(namespace, heap, expr_loc)?;
+            let result = obj.py_bool(heap);
+            // Drop temporary reference
+            obj.drop_with_heap(heap);
+            Ok(result)
+        }
     }
 }
 
@@ -166,6 +210,48 @@ fn eval_op<'c, 'e>(
         left_object.drop_with_heap(heap);
         right_object.drop_with_heap(heap);
         SimpleException::operand_type_error(left, op, right, left_type, right_type)
+    }
+}
+
+/// Evaluates the `and` operator with short-circuit evaluation.
+///
+/// Python's `and` operator returns the first falsy operand, or the last operand if all are truthy.
+/// For example: `5 and 3` returns `3`, while `0 and 3` returns `0`.
+fn eval_and<'c, 'e>(
+    namespace: &mut [Object<'c, 'e>],
+    heap: &mut Heap<'c, 'e>,
+    left: &'e ExprLoc<'c>,
+    right: &'e ExprLoc<'c>,
+) -> RunResult<'c, Object<'c, 'e>> {
+    let left_val = evaluate_use(namespace, heap, left)?;
+    if left_val.py_bool(heap) {
+        // Left is truthy, drop it and return right
+        left_val.drop_with_heap(heap);
+        evaluate_use(namespace, heap, right)
+    } else {
+        // Short-circuit: return left if falsy
+        Ok(left_val)
+    }
+}
+
+/// Evaluates the `or` operator with short-circuit evaluation.
+///
+/// Python's `or` operator returns the first truthy operand, or the last operand if all are falsy.
+/// For example: `5 or 3` returns `5`, while `0 or 3` returns `3`.
+fn eval_or<'c, 'e>(
+    namespace: &mut [Object<'c, 'e>],
+    heap: &mut Heap<'c, 'e>,
+    left: &'e ExprLoc<'c>,
+    right: &'e ExprLoc<'c>,
+) -> RunResult<'c, Object<'c, 'e>> {
+    let left_val = evaluate_use(namespace, heap, left)?;
+    if left_val.py_bool(heap) {
+        // Short-circuit: return left if truthy
+        Ok(left_val)
+    } else {
+        // Left is falsy, drop it and return right
+        left_val.drop_with_heap(heap);
+        evaluate_use(namespace, heap, right)
     }
 }
 

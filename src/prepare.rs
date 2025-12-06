@@ -299,6 +299,7 @@ impl Prepare {
                     .collect::<Result<_, ParseError<'c>>>()?;
                 Expr::Dict(prepared_pairs)
             }
+            Expr::Not(operand) => Expr::Not(Box::new(self.prepare_expression(*operand)?)),
         };
 
         // Optimization: Transform `(x % n) == value` with any constant right-hand side into a

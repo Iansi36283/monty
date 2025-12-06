@@ -74,6 +74,8 @@ pub(crate) enum Expr<'c> {
         index: Box<ExprLoc<'c>>,
     },
     Dict(Vec<(ExprLoc<'c>, ExprLoc<'c>)>),
+    /// Unary `not` expression - evaluates to the boolean negation of the operand's truthiness.
+    Not(Box<ExprLoc<'c>>),
 }
 
 impl fmt::Display for Expr<'_> {
@@ -116,6 +118,7 @@ impl fmt::Display for Expr<'_> {
                     f.write_char('}')
                 }
             }
+            Self::Not(operand) => write!(f, "not {operand}"),
         }
     }
 }
