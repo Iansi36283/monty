@@ -269,14 +269,18 @@ pub enum Opcode {
     /// After the two count bytes, there are kw_count little-endian u16 values,
     /// each being a StringId index for the corresponding keyword argument name.
     CallFunctionKw,
-    /// Call method. Operands: u16 name_id, u8 arg_count.
-    CallMethod,
-    /// Call method with keyword args. Operands: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
+    /// Call attribute on object. Operands: u16 name_id, u8 arg_count.
+    ///
+    /// This is used for both method calls (`obj.method(args)`) and module
+    /// attribute calls (`module.func(args)`). The attribute is looked up
+    /// on the object and called with the given arguments.
+    CallAttr,
+    /// Call attribute with keyword args. Operands: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
     ///
     /// Stack: [obj, pos_args..., kw_values...]
     /// After the operands, there are kw_count little-endian u16 values,
     /// each being a StringId index for the corresponding keyword argument name.
-    CallMethodKw,
+    CallAttrKw,
     /// Call a defined function with *args tuple and **kwargs dict. Operand: u8 flags.
     ///
     /// Flags:
@@ -335,6 +339,18 @@ pub enum Opcode {
     /// Return TOS from function.
     ReturnValue,
 
+    // === Async/Await ===
+    /// Await the TOS value.
+    ///
+    /// Handles `ExternalFuture`, `Coroutine`, and `GatherFuture` awaitables.
+    /// For `ExternalFuture`: if resolved, pushes result; if pending, blocks task.
+    /// For `Coroutine`: validates state is `New`, then starts execution.
+    /// For `GatherFuture`: spawns all coroutines as tasks and blocks until completion.
+    ///
+    /// Raises `TypeError` if TOS is not awaitable.
+    /// Raises `RuntimeError` if coroutine/future has already been awaited.
+    Await,
+
     // === Unpacking ===
     /// Unpack TOS into n values. Operand: u8 count.
     UnpackSequence,
@@ -371,10 +387,10 @@ impl Opcode {
     #[must_use]
     pub const fn stack_effect(self) -> Option<i16> {
         use Opcode::{
-            BinaryAdd, BinaryAnd, BinaryDiv, BinaryFloorDiv, BinaryLShift, BinaryMatMul, BinaryMod, BinaryMul,
+            Await, BinaryAdd, BinaryAnd, BinaryDiv, BinaryFloorDiv, BinaryLShift, BinaryMatMul, BinaryMod, BinaryMul,
             BinaryOr, BinaryPow, BinaryRShift, BinarySub, BinarySubscr, BinaryXor, BuildDict, BuildFString, BuildList,
-            BuildSet, BuildSlice, BuildTuple, CallBuiltinFunction, CallBuiltinType, CallFunction, CallFunctionExtended,
-            CallFunctionKw, CallMethod, CallMethodKw, CheckExcMatch, ClearException, CompareEq, CompareGe, CompareGt,
+            BuildSet, BuildSlice, BuildTuple, CallAttr, CallAttrKw, CallBuiltinFunction, CallBuiltinType, CallFunction,
+            CallFunctionExtended, CallFunctionKw, CheckExcMatch, ClearException, CompareEq, CompareGe, CompareGt,
             CompareIn, CompareIs, CompareIsNot, CompareLe, CompareLt, CompareModEq, CompareNe, CompareNotIn,
             DeleteAttr, DeleteLocal, DeleteSubscr, DictMerge, DictSetItem, Dup, ForIter, FormatValue, GetIter,
             InplaceAdd, InplaceAnd, InplaceDiv, InplaceFloorDiv, InplaceLShift, InplaceMod, InplaceMul, InplaceOr,
@@ -441,7 +457,7 @@ impl Opcode {
             DeleteAttr => -1,               // pop 1, push 0
 
             // Function calls - depend on arg count
-            CallFunction | CallBuiltinFunction | CallBuiltinType | CallFunctionKw | CallMethod | CallMethodKw
+            CallFunction | CallBuiltinFunction | CallBuiltinType | CallFunctionKw | CallAttr | CallAttrKw
             | CallFunctionExtended => return None,
 
             // Control flow - no stack effect (jumps don't push/pop)
@@ -452,6 +468,9 @@ impl Opcode {
             // Iteration
             GetIter => 0,           // pop iterable, push iterator
             ForIter => return None, // pushes value or jumps (variable)
+
+            // Async/await
+            Await => 0, // pop awaitable, push result
 
             // Function definition - push 1 (the function/closure)
             MakeFunction | MakeClosure => 1,

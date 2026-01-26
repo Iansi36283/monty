@@ -271,6 +271,14 @@ impl ExcType {
         SimpleException::new_msg(Self::TypeError, format!("'{type_}' object is not subscriptable")).into()
     }
 
+    /// Creates a TypeError for awaiting a non-awaitable object.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object can't be awaited`
+    #[must_use]
+    pub(crate) fn object_not_awaitable(type_: Type) -> RunError {
+        SimpleException::new_msg(Self::TypeError, format!("'{type_}' object can't be awaited")).into()
+    }
+
     /// Creates a TypeError for item assignment on types that don't support it.
     ///
     /// Matches CPython's format: `TypeError: '{type}' object does not support item assignment`
@@ -802,7 +810,12 @@ impl ExcType {
     /// Matches CPython's format: `NameError: name 'x' is not defined`
     #[must_use]
     pub(crate) fn name_error(name: &str) -> SimpleException {
-        SimpleException::new_msg(Self::NameError, format!("name '{name}' is not defined"))
+        let mut msg = format!("name '{name}' is not defined");
+        // add the same suffix as cpython, but only for the modules supported by Monty
+        if matches!(name, "asyncio" | "sys" | "typing" | "types") {
+            write!(&mut msg, ". Did you forget to import '{name}'?").unwrap();
+        }
+        SimpleException::new_msg(Self::NameError, msg)
     }
 
     /// Creates an UnboundLocalError for accessing a local variable before assignment.
@@ -1327,7 +1340,7 @@ impl RawStackFrame {
 /// - `Internal`: Bug in interpreter implementation (static message)
 /// - `Exc`: Python exception that can be caught by try/except (when implemented)
 /// - `UncatchableExc`: Python exception from resource limits that CANNOT be caught
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum RunError {
     /// Internal interpreter error - indicates a bug in Monty, not user code.
     Internal(Cow<'static, str>),

@@ -11,10 +11,11 @@ use std::{
 
 use ahash::AHashMap;
 use monty::{
-    ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun, ResourceLimits, RunProgress,
-    StdPrint,
+    ExcType, ExternalResult, LimitedTracker, MontyException, MontyFuture, MontyObject, MontyRun, ResourceLimits,
+    RunProgress, StdPrint,
 };
 use pyo3::{prelude::*, types::PyDict};
+use similar::TextDiff;
 
 /// Recursion limit for test execution.
 ///
@@ -28,7 +29,7 @@ const TEST_RECURSION_LIMIT: usize = 50;
 
 /// Test configuration parsed from directive comments.
 ///
-/// Parsed from an optional first-line comment like `# xfail=monty,cpython` or `# mode: iter`.
+/// Parsed from an optional first-line comment like `# xfail=monty,cpython` or `# call-external`.
 /// If not present, defaults to running on both interpreters in standard mode.
 ///
 /// ## Xfail Semantics (Strict)
@@ -36,6 +37,7 @@ const TEST_RECURSION_LIMIT: usize = 50;
 /// - `xfail=cpython` - Test is expected to fail on CPython; if it passes, that's an error
 /// - `xfail=monty,cpython` - Expected to fail on both interpreters
 #[derive(Debug, Clone, Default)]
+#[expect(clippy::struct_excessive_bools)]
 struct TestConfig {
     /// When true, test is expected to fail on Monty (strict xfail).
     xfail_monty: bool,
@@ -43,6 +45,9 @@ struct TestConfig {
     xfail_cpython: bool,
     /// When true, use MontyRun with external function support instead of MontyRun.
     iter_mode: bool,
+    /// When true, wrap code in async context for CPython execution.
+    /// Used for tests with top-level await which Monty supports but CPython doesn't.
+    async_mode: bool,
 }
 
 /// Represents the expected outcome of a test fixture
@@ -79,7 +84,7 @@ impl Expectation {
 
 /// Parse a Python fixture file into code, expected outcome, and test configuration.
 ///
-/// The file may optionally start with a `# xfail=monty,cpython` comment to specify
+/// The file may optionally contain a `# xfail=monty,cpython` comment to specify
 /// which interpreters the test is expected to fail on. If not present, defaults to
 /// running on both and expecting success.
 ///
@@ -106,45 +111,30 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
 
     assert!(!lines.is_empty(), "Empty fixture file");
 
-    // Check for directives at the start of the file
-    // Supports: # xfail=monty,cpython and # mode: iter (can be combined on same line)
-    // Note: Directive lines are kept in the code (they're Python comments) to preserve line numbers
-    let (config, code_start_idx) = if let Some(first_line) = lines.first() {
-        let mut config = TestConfig::default();
+    // comment lines with leading # and spaces stripped
+    let comment_lines = lines
+        .iter()
+        .filter(|line| line.starts_with('#'))
+        .map(|line| line.trim_start_matches('#').trim())
+        .collect::<Vec<_>>();
 
-        // Check for mode: iter directive
-        if first_line.contains("mode: iter") {
-            config.iter_mode = true;
-        }
-
-        // Check for xfail= directive
-        if let Some(xfail_idx) = first_line.find("xfail=") {
-            let xfail_str = &first_line[xfail_idx + 6..];
-            // Parse until whitespace or end of line
-            let xfail_end = xfail_str.find(|c: char| c.is_whitespace()).unwrap_or(xfail_str.len());
-            let xfail_str = &xfail_str[..xfail_end];
-            config.xfail_monty = xfail_str.contains("monty");
-            if xfail_str.contains("cpython") {
-                config.xfail_cpython = true;
-            }
-        }
-
-        (config, 0)
-    } else {
-        (TestConfig::default(), 0)
+    let mut config = TestConfig {
+        iter_mode: comment_lines.iter().any(|line| line.starts_with("call-external")),
+        async_mode: comment_lines.iter().any(|line| line.starts_with("run-async")),
+        ..Default::default()
     };
-
-    // Check if first code line has an expectation (this is an error)
-    if let Some(first_code_line) = lines.get(code_start_idx) {
-        assert!(
-            !(first_code_line.starts_with("# Return") || first_code_line.starts_with("# Raise")),
-            "Expectation comment must be on the LAST line, not the first line"
-        );
+    // Check for "xfail=" directive
+    if let Some(&xfail_line) = comment_lines.iter().find(|line| line.starts_with("xfail=")) {
+        // Parse until whitespace or end of line
+        let xfail_end = xfail_line.find(|c: char| c.is_whitespace()).unwrap_or(xfail_line.len());
+        let xfail_str = &xfail_line[..xfail_end];
+        config.xfail_monty = xfail_str.contains("monty");
+        config.xfail_cpython = xfail_str.contains("cpython");
     }
 
     // Check for TRACEBACK expectation (triple-quoted string at end of file)
     // Format: """TRACEBACK:\n...\n"""
-    if let Some((code, traceback)) = parse_traceback_expectation(content, code_start_idx) {
+    if let Some((code, traceback)) = parse_traceback_expectation(content) {
         return (code, Expectation::Traceback(traceback), config);
     }
 
@@ -156,31 +146,19 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
     let (expectation, code_lines) = if let Some(expected) = last_line.strip_prefix("# ref-counts=") {
         (
             Expectation::RefCounts(parse_ref_counts(expected)),
-            &lines[code_start_idx..lines.len() - 1],
+            &lines[..lines.len() - 1],
         )
     } else if let Some(expected) = last_line.strip_prefix("# Return.str=") {
-        (
-            Expectation::ReturnStr(expected.to_string()),
-            &lines[code_start_idx..lines.len() - 1],
-        )
+        (Expectation::ReturnStr(expected.to_string()), &lines[..lines.len() - 1])
     } else if let Some(expected) = last_line.strip_prefix("# Return.type=") {
-        (
-            Expectation::ReturnType(expected.to_string()),
-            &lines[code_start_idx..lines.len() - 1],
-        )
+        (Expectation::ReturnType(expected.to_string()), &lines[..lines.len() - 1])
     } else if let Some(expected) = last_line.strip_prefix("# Return=") {
-        (
-            Expectation::Return(expected.to_string()),
-            &lines[code_start_idx..lines.len() - 1],
-        )
+        (Expectation::Return(expected.to_string()), &lines[..lines.len() - 1])
     } else if let Some(expected) = last_line.strip_prefix("# Raise=") {
-        (
-            Expectation::Raise(expected.to_string()),
-            &lines[code_start_idx..lines.len() - 1],
-        )
+        (Expectation::Raise(expected.to_string()), &lines[..lines.len() - 1])
     } else {
         // No expectation comment - just run and check it doesn't raise
-        (Expectation::NoException, &lines[code_start_idx..])
+        (Expectation::NoException, &lines[..])
     };
 
     // Code is everything except the directive comment (and expectation comment if present)
@@ -196,7 +174,7 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
 ///
 /// The traceback string should contain the full expected output including the
 /// "Traceback (most recent call last):" header and the exception line.
-fn parse_traceback_expectation(content: &str, code_start_idx: usize) -> Option<(String, String)> {
+fn parse_traceback_expectation(content: &str) -> Option<(String, String)> {
     // Format: """\nTRACEBACK:\n...\n"""
     const MARKER: &str = "\"\"\"\nTRACEBACK:\n";
 
@@ -206,7 +184,7 @@ fn parse_traceback_expectation(content: &str, code_start_idx: usize) -> Option<(
     // Extract the code before the marker
     let code_part = &content[..marker_pos];
     let lines: Vec<&str> = code_part.lines().collect();
-    let code = lines[code_start_idx..].join("\n").trim_end().to_string();
+    let code = lines.join("\n").trim_end().to_string();
 
     // Extract the traceback content between the markers
     let after_marker = &content[marker_pos + MARKER.len()..];
@@ -247,7 +225,7 @@ fn parse_ref_counts(s: &str) -> AHashMap<String, usize> {
 
 /// External function names available in iter mode tests.
 ///
-/// These functions are provided by the test runner when a test uses `# mode: iter`.
+/// These functions are provided by the test runner when a test uses `# call-external`.
 const ITER_EXT_FUNCTIONS: &[&str] = &[
     "add_ints",           // (a, b) -> a + b (integers)
     "concat_strings",     // (a, b) -> a + b (strings)
@@ -258,6 +236,7 @@ const ITER_EXT_FUNCTIONS: &[&str] = &[
     "make_mutable_point", // () -> Dataclass Point(x=1, y=2) (mutable)
     "make_user",          // (name) -> Dataclass User(name=name, active=True) (immutable)
     "make_empty",         // () -> Dataclass Empty() (immutable, no fields)
+    "async_call",         // (x) -> async: returns x (coroutine that returns its argument)
 ];
 
 /// Python implementations of external functions for running iter mode tests in CPython.
@@ -269,34 +248,48 @@ const ITER_EXT_FUNCTIONS: &[&str] = &[
 /// `scripts/run_traceback.py` to ensure consistency.
 const ITER_EXT_FUNCTIONS_PYTHON: &str = include_str!("../../../scripts/iter_test_methods.py");
 
+/// Result from dispatching an external function call.
+///
+/// Distinguishes between synchronous calls (return immediately) and
+/// asynchronous calls (return a future that needs later resolution).
+enum DispatchResult {
+    /// Synchronous result - pass directly to `state.run()`.
+    Sync(ExternalResult),
+    /// Asynchronous call - use `state.run_pending()` and resolve later.
+    /// Contains the value to resolve the future with.
+    Async(MontyObject),
+}
+
 /// Dispatches an external function call to the appropriate test implementation.
 ///
-/// Returns `ExternalResult::Return` for successful calls, or `ExternalResult::Error`
-/// for calls that should raise an exception.
+/// Returns `DispatchResult::Sync` for synchronous calls or `DispatchResult::Async`
+/// for coroutine calls that should use `run_pending()`.
 ///
 /// # Panics
 /// Panics if the function name is unknown or arguments are invalid types.
-fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> ExternalResult {
+fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> DispatchResult {
     match name {
         "add_ints" => {
             assert!(args.len() == 2, "add_ints requires 2 arguments");
             let a = i64::try_from(&args[0]).expect("add_ints: first arg must be int");
             let b = i64::try_from(&args[1]).expect("add_ints: second arg must be int");
-            MontyObject::Int(a + b).into()
+            DispatchResult::Sync(MontyObject::Int(a + b).into())
         }
         "concat_strings" => {
             assert!(args.len() == 2, "concat_strings requires 2 arguments");
             let a = String::try_from(&args[0]).expect("concat_strings: first arg must be str");
             let b = String::try_from(&args[1]).expect("concat_strings: second arg must be str");
-            MontyObject::String(a + &b).into()
+            DispatchResult::Sync(MontyObject::String(a + &b).into())
         }
         "return_value" => {
             assert!(args.len() == 1, "return_value requires 1 argument");
-            args.into_iter().next().unwrap().into()
+            DispatchResult::Sync(args.into_iter().next().unwrap().into())
         }
         "get_list" => {
             assert!(args.is_empty(), "get_list requires no arguments");
-            MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2), MontyObject::Int(3)]).into()
+            DispatchResult::Sync(
+                MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2), MontyObject::Int(3)]).into(),
+            )
         }
         "raise_error" => {
             // raise_error(exc_type: str, message: str) -> raises exception
@@ -310,72 +303,86 @@ fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> ExternalResult 
                 "RuntimeError" => ExcType::RuntimeError,
                 _ => panic!("raise_error: unsupported exception type: {exc_type_str}"),
             };
-            MontyException::new(exc_type, Some(message)).into()
+            DispatchResult::Sync(MontyException::new(exc_type, Some(message)).into())
         }
         "make_point" => {
             assert!(args.is_empty(), "make_point requires no arguments");
             // Return an immutable Point(x=1, y=2) dataclass
-            MontyObject::Dataclass {
-                name: "Point".to_string(),
-                type_id: 0, // Test fixture has no real Python type
-                field_names: vec!["x".to_string(), "y".to_string()],
-                attrs: vec![
-                    (MontyObject::String("x".to_string()), MontyObject::Int(1)),
-                    (MontyObject::String("y".to_string()), MontyObject::Int(2)),
-                ]
+            DispatchResult::Sync(
+                MontyObject::Dataclass {
+                    name: "Point".to_string(),
+                    type_id: 0, // Test fixture has no real Python type
+                    field_names: vec!["x".to_string(), "y".to_string()],
+                    attrs: vec![
+                        (MontyObject::String("x".to_string()), MontyObject::Int(1)),
+                        (MontyObject::String("y".to_string()), MontyObject::Int(2)),
+                    ]
+                    .into(),
+                    methods: vec![],
+                    frozen: true,
+                }
                 .into(),
-                methods: vec![],
-                frozen: true,
-            }
-            .into()
+            )
         }
         "make_mutable_point" => {
             assert!(args.is_empty(), "make_mutable_point requires no arguments");
             // Return a mutable Point(x=1, y=2) dataclass
-            MontyObject::Dataclass {
-                name: "MutablePoint".to_string(),
-                type_id: 0, // Test fixture has no real Python type
-                field_names: vec!["x".to_string(), "y".to_string()],
-                attrs: vec![
-                    (MontyObject::String("x".to_string()), MontyObject::Int(1)),
-                    (MontyObject::String("y".to_string()), MontyObject::Int(2)),
-                ]
+            DispatchResult::Sync(
+                MontyObject::Dataclass {
+                    name: "MutablePoint".to_string(),
+                    type_id: 0, // Test fixture has no real Python type
+                    field_names: vec!["x".to_string(), "y".to_string()],
+                    attrs: vec![
+                        (MontyObject::String("x".to_string()), MontyObject::Int(1)),
+                        (MontyObject::String("y".to_string()), MontyObject::Int(2)),
+                    ]
+                    .into(),
+                    methods: vec![],
+                    frozen: false,
+                }
                 .into(),
-                methods: vec![],
-                frozen: false,
-            }
-            .into()
+            )
         }
         "make_user" => {
             assert!(args.len() == 1, "make_user requires 1 argument");
             let name = String::try_from(&args[0]).expect("make_user: first arg must be str");
             // Return an immutable User(name=name, active=True) dataclass
-            MontyObject::Dataclass {
-                name: "User".to_string(),
-                type_id: 0, // Test fixture has no real Python type
-                field_names: vec!["name".to_string(), "active".to_string()],
-                attrs: vec![
-                    (MontyObject::String("name".to_string()), MontyObject::String(name)),
-                    (MontyObject::String("active".to_string()), MontyObject::Bool(true)),
-                ]
+            DispatchResult::Sync(
+                MontyObject::Dataclass {
+                    name: "User".to_string(),
+                    type_id: 0, // Test fixture has no real Python type
+                    field_names: vec!["name".to_string(), "active".to_string()],
+                    attrs: vec![
+                        (MontyObject::String("name".to_string()), MontyObject::String(name)),
+                        (MontyObject::String("active".to_string()), MontyObject::Bool(true)),
+                    ]
+                    .into(),
+                    methods: vec![],
+                    frozen: true,
+                }
                 .into(),
-                methods: vec![],
-                frozen: true,
-            }
-            .into()
+            )
         }
         "make_empty" => {
             assert!(args.is_empty(), "make_empty requires no arguments");
             // Return an immutable empty dataclass with no fields
-            MontyObject::Dataclass {
-                name: "Empty".to_string(),
-                type_id: 0, // Test fixture has no real Python type
-                field_names: vec![],
-                attrs: vec![].into(),
-                methods: vec![],
-                frozen: true,
-            }
-            .into()
+            DispatchResult::Sync(
+                MontyObject::Dataclass {
+                    name: "Empty".to_string(),
+                    type_id: 0, // Test fixture has no real Python type
+                    field_names: vec![],
+                    attrs: vec![].into(),
+                    methods: vec![],
+                    frozen: true,
+                }
+                .into(),
+            )
+        }
+        "async_call" => {
+            // async_call(x) -> coroutine that returns x
+            // This is an async function - use run_pending() and resolve later
+            assert!(args.len() == 1, "async_call requires 1 argument");
+            DispatchResult::Async(args.into_iter().next().unwrap())
         }
         _ => panic!("Unknown external function: {name}"),
     }
@@ -392,11 +399,16 @@ struct TestFailure {
 
 impl std::fmt::Display for TestFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
+        writeln!(
             f,
-            "[{}] {} mismatch\n  expected: {}\n  actual: {}",
-            self.test_name, self.kind, self.expected, self.actual
-        )
+            "[{}] {} mismatch\ngot {:?}\ndiff:",
+            self.test_name, self.kind, self.actual
+        )?;
+
+        for change in TextDiff::from_lines(&self.expected, &self.actual).iter_all_changes() {
+            write!(f, "{}{}", change.tag(), change)?;
+        }
+        Ok(())
     }
 }
 
@@ -585,7 +597,7 @@ fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<()
 
 /// Try to run a test using MontyRun with external function support.
 ///
-/// This function handles tests marked with `# mode: iter` directive by using the
+/// This function handles tests marked with `# call-external` directive by using the
 /// iterative executor API and providing implementations for predefined external functions.
 fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
@@ -729,9 +741,16 @@ fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Resu
 /// When `ref-count-panic` feature is NOT enabled, this function also tests
 /// serialization round-trips by dumping and loading the execution state at
 /// each external function call boundary.
+///
+/// Supports both synchronous and asynchronous external functions:
+/// - Sync functions: result is passed immediately via `state.run()`
+/// - Async functions: `state.run_pending()` creates a future, resolved via `ResolveFutures`
 fn run_iter_loop(exec: MontyRun) -> Result<MontyObject, MontyException> {
     let limits = ResourceLimits::new().max_recursion_depth(Some(TEST_RECURSION_LIMIT));
     let mut progress = exec.start(vec![], LimitedTracker::new(limits), &mut StdPrint)?;
+
+    // Track pending async calls: (call_id, result_value)
+    let mut pending_results: Vec<(u32, MontyObject)> = Vec::new();
 
     loop {
         // Test serialization round-trip at each step (skip when ref-count-panic is enabled
@@ -748,10 +767,42 @@ fn run_iter_loop(exec: MontyRun) -> Result<MontyObject, MontyException> {
                 function_name,
                 args,
                 kwargs: _,
+                call_id,
                 state,
             } => {
-                let return_value = dispatch_external_call(&function_name, args);
-                progress = state.run(return_value, &mut StdPrint)?;
+                let dispatch_result = dispatch_external_call(&function_name, args);
+                match dispatch_result {
+                    DispatchResult::Sync(return_value) => {
+                        progress = state.run(return_value, &mut StdPrint)?;
+                    }
+                    DispatchResult::Async(result_value) => {
+                        // Store the result for later resolution
+                        pending_results.push((call_id, result_value));
+                        // Continue execution with a pending future
+                        progress = state.run(MontyFuture, &mut StdPrint)?;
+                    }
+                }
+            }
+            RunProgress::ResolveFutures(state) => {
+                // Resolve all pending futures that we have results for
+                let results: Vec<(u32, ExternalResult)> = state
+                    .pending_call_ids()
+                    .iter()
+                    .filter_map(|p| {
+                        pending_results.iter().position(|(id, _)| id == p).map(|idx| {
+                            let (call_id, value) = pending_results.remove(idx);
+                            (call_id, ExternalResult::Return(value))
+                        })
+                    })
+                    .collect();
+
+                assert!(
+                    !results.is_empty(),
+                    "ResolveFutures: no results available for pending calls: {:?}",
+                    state.pending_call_ids().iter().collect::<Vec<_>>()
+                );
+
+                progress = state.resume(results, &mut StdPrint)?;
             }
         }
     }
@@ -792,6 +843,72 @@ fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option
     }
 }
 
+/// Wraps code in an async context for CPython execution.
+///
+/// Monty supports top-level `await`, but CPython does not. This function transforms code
+/// like:
+///
+/// ```python
+/// async def foo():
+///     return 1
+/// result = await foo()
+/// ```
+///
+/// Into:
+///
+/// ```python
+/// import asyncio
+/// async def __test_main():
+///     async def foo():
+///         return 1
+///     result = await foo()
+///     return result  # if need_return_value
+/// __test_result__ = asyncio.run(__test_main())
+/// ```
+fn wrap_code_for_async(code: &str, need_return_value: bool) -> (String, Option<String>) {
+    let lines: Vec<&str> = code.lines().collect();
+
+    // Find the last non-empty, non-comment line
+    let last_idx = lines
+        .iter()
+        .rposition(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .expect("Empty code");
+
+    // Indent all code by 4 spaces for the function body
+    let indented: String = lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let return_stmt = if need_return_value {
+        // The last non-empty, non-comment line is the expression to return
+        let last_line = lines[last_idx].trim();
+        format!("\n    return {last_line}")
+    } else {
+        String::new()
+    };
+
+    let wrapped = format!(
+        "import asyncio\nasync def __test_main():\n{indented}{return_stmt}\n__test_result__ = asyncio.run(__test_main())"
+    );
+
+    if need_return_value {
+        (wrapped, Some("__test_result__".to_string()))
+    } else {
+        (wrapped, None)
+    }
+}
+
 /// Run the traceback script to get CPython's traceback output for a test file.
 ///
 /// This imports scripts/run_traceback.py via pyo3 and calls `run_file_and_get_traceback()`
@@ -800,7 +917,9 @@ fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option
 ///
 /// When `iter_mode` is true, external function implementations are injected into the
 /// file's globals before execution.
-fn run_traceback_script(path: &Path, iter_mode: bool) -> String {
+///
+/// When `async_mode` is true, code is wrapped in an async context before execution.
+fn run_traceback_script(path: &Path, iter_mode: bool, async_mode: bool) -> String {
     Python::attach(|py| {
         let run_traceback = import_run_traceback(py);
 
@@ -808,11 +927,11 @@ fn run_traceback_script(path: &Path, iter_mode: bool) -> String {
         let abs_path = path.canonicalize().expect("Failed to get absolute path");
         let path_str = abs_path.to_str().expect("Invalid UTF-8 in path");
 
-        // Call run_file_and_get_traceback with the recursion limit and iter_mode flag
+        // Call run_file_and_get_traceback with the recursion limit, iter_mode, and async_mode flags
         let result = run_traceback
             .call_method1(
                 "run_file_and_get_traceback",
-                (path_str, TEST_RECURSION_LIMIT, iter_mode),
+                (path_str, TEST_RECURSION_LIMIT, iter_mode, async_mode),
             )
             .expect("Failed to call run_file_and_get_traceback");
 
@@ -877,6 +996,7 @@ fn try_run_cpython_test(
     code: &str,
     expectation: &Expectation,
     iter_mode: bool,
+    async_mode: bool,
 ) -> Result<(), TestFailure> {
     // Skip RefCounts tests - only relevant for Monty
     if matches!(expectation, Expectation::RefCounts(_)) {
@@ -887,7 +1007,7 @@ fn try_run_cpython_test(
 
     // Traceback tests use the external script for reliable caret line support
     if let Expectation::Traceback(expected) = expectation {
-        let result = run_traceback_script(path, iter_mode);
+        let result = run_traceback_script(path, iter_mode, async_mode);
         if result != *expected {
             return Err(TestFailure {
                 test_name,
@@ -903,7 +1023,13 @@ fn try_run_cpython_test(
         expectation,
         Expectation::Return(_) | Expectation::ReturnStr(_) | Expectation::ReturnType(_)
     );
-    let (statements, maybe_expr) = split_code_for_module(code, need_return_value);
+
+    // Use async wrapper for tests with top-level await
+    let (statements, maybe_expr) = if async_mode {
+        wrap_code_for_async(code, need_return_value)
+    } else {
+        split_code_for_module(code, need_return_value)
+    };
 
     let result: CpythonResult = Python::attach(|py| {
         // Execute statements at module level
@@ -1166,7 +1292,7 @@ fn run_test_cases_cpython(path: &Path) -> Result<(), Box<dyn Error>> {
     let (code, expectation, config) = parse_fixture(&content);
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
 
-    let result = try_run_cpython_test(path, &code, &expectation, config.iter_mode);
+    let result = try_run_cpython_test(path, &code, &expectation, config.iter_mode, config.async_mode);
 
     if config.xfail_cpython {
         // Strict xfail: test must fail; if it passed, xfail should be removed

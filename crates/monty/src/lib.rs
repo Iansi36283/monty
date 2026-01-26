@@ -1,5 +1,6 @@
 #![doc = include_str!("../../../README.md")]
 mod args;
+mod asyncio;
 mod builtins;
 mod bytecode;
 mod exception_private;
@@ -29,5 +30,5 @@ pub use crate::{
     io::{CollectStringPrint, NoPrint, PrintWriter, StdPrint},
     object::{DictPairs, InvalidInputError, MontyObject},
     resource::{LimitedTracker, NoLimitTracker, ResourceError, ResourceLimits, ResourceTracker},
-    run::{ExternalResult, MontyRun, RunProgress, Snapshot},
+    run::{ExternalResult, FutureSnapshot, MontyFuture, MontyRun, RunProgress, Snapshot},
 };

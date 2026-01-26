@@ -57,6 +57,7 @@ known-first-party = ["monty"]
     "F632", # ignore replace `is` with `==` - we have lots of these tests
     "F701", # break outside loop - needed for testing break error handling
     "F702", # continue not properly in loop - needed for testing continue error handling
+    "F704", # await outside function - needed for testing top-level async/await
     "F811", # Redefinition of unused variable
     "F821", # traceback undefined call test intentionally uses undefined name
     "F841", # unused variable - needed for testing exception variable cleanup
@@ -68,6 +69,9 @@ known-first-party = ["monty"]
 "crates/monty-typeshed/vendor/typeshed/stdlib/**/*.pyi" = [
     "F403", # unable to detect undefined names
     "F821", # Undefined name
+]
+"crates/monty-type-checking/tests/good_types.py" = [
+    "F704", # await outside function - needed for testing top-level async/await
 ]
 
 [tool.ruff.format]

@@ -93,9 +93,10 @@ def test_start_chain_of_external_calls():
     m = monty.Monty('c() + c() + c()', external_functions=['c'])
 
     call_count = 0
-    progress: monty.MontySnapshot | monty.MontyComplete = m.start()
+    progress: monty.MontySnapshot | monty.MontyFutureSnapshot | monty.MontyComplete = m.start()
 
-    while isinstance(progress, monty.MontySnapshot):
+    while isinstance(progress, monty.MontySnapshot | monty.MontyFutureSnapshot):
+        assert isinstance(progress, monty.MontySnapshot), 'Expected MontySnapshot'
         assert progress.function_name == snapshot('c')
         call_count += 1
         progress = progress.resume(return_value=call_count)

@@ -396,8 +396,13 @@ impl<'i> Prepare<'i> {
                     let or_else = self.prepare_nodes(or_else)?;
                     new_nodes.push(Node::If { test, body, or_else });
                 }
-                Node::FunctionDef(RawFunctionDef { name, signature, body }) => {
-                    let func_node = self.prepare_function_def(name, &signature, body)?;
+                Node::FunctionDef(RawFunctionDef {
+                    name,
+                    signature,
+                    body,
+                    is_async,
+                }) => {
+                    let func_node = self.prepare_function_def(name, &signature, body, is_async)?;
                     new_nodes.push(func_node);
                 }
                 Node::Global { names, position } => {
@@ -703,6 +708,7 @@ impl<'i> Prepare<'i> {
                     value,
                 }
             }
+            Expr::Await(value) => Expr::Await(Box::new(self.prepare_expression(*value)?)),
         };
 
         // Optimization: Transform `(x % n) == value` with any constant right-hand side into a
@@ -998,6 +1004,7 @@ impl<'i> Prepare<'i> {
         name: Identifier,
         parsed_sig: &ParsedSignature,
         body: Vec<ParseNode>,
+        is_async: bool,
     ) -> Result<PreparedNode, ParseError> {
         // Register the function name in the current scope
         let (name, _) = self.get_id(name);
@@ -1187,6 +1194,7 @@ impl<'i> Prepare<'i> {
             cell_var_count,
             cell_param_indices,
             default_exprs,
+            is_async,
         }))
     }
 
@@ -1373,7 +1381,7 @@ impl<'i> Prepare<'i> {
             }
         }
 
-        // Create the prepared function definition
+        // Create the prepared function definition (lambdas are never async)
         let func_def = PreparedFunctionDef {
             name: lambda_name,
             signature,
@@ -1383,6 +1391,7 @@ impl<'i> Prepare<'i> {
             cell_var_count,
             cell_param_indices,
             default_exprs,
+            is_async: false,
         };
 
         Ok(ExprLoc::new(
@@ -1893,7 +1902,11 @@ fn collect_assigned_names_from_expr(expr: &ExprLoc, assigned_names: &mut AHashSe
             collect_assigned_names_from_expr(left, assigned_names, interner);
             collect_assigned_names_from_expr(right, assigned_names, interner);
         }
-        Expr::Not(operand) | Expr::UnaryMinus(operand) | Expr::UnaryPlus(operand) | Expr::UnaryInvert(operand) => {
+        Expr::Not(operand)
+        | Expr::UnaryMinus(operand)
+        | Expr::UnaryPlus(operand)
+        | Expr::UnaryInvert(operand)
+        | Expr::Await(operand) => {
             collect_assigned_names_from_expr(operand, assigned_names, interner);
         }
         Expr::Subscript { object, index } => {
@@ -2259,6 +2272,9 @@ fn collect_cell_vars_from_expr(
             // Only scan the value expression for cell vars
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
         }
+        Expr::Await(value) => {
+            collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
+        }
         // Leaf expressions
         Expr::Literal(_) | Expr::Builtin(_) | Expr::Name(_) | Expr::Lambda { .. } | Expr::Slice { .. } => {}
     }
@@ -2543,6 +2559,9 @@ fn collect_referenced_names_from_expr(
             if let Some(expr) = step {
                 collect_referenced_names_from_expr(expr, referenced, interner);
             }
+        }
+        Expr::Await(value) => {
+            collect_referenced_names_from_expr(value, referenced, interner);
         }
     }
 }

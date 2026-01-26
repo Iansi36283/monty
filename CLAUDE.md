@@ -191,6 +191,8 @@ assert x == expected, 'test description'
 
 Each `assert` should have a descriptive message.
 
+Do NOT Write tests like `assert 'thing' in msg` it's lazy and inexact unless explicitly told to do so, instead write tests like `assert msg == 'expected message'` to ensure clarity and accuracy and most importantly, to identify differences between Monty and CPython.
+
 ### When to Create Separate Test Files
 
 Only create a separate test file when you MUST use one of these special expectation formats:
@@ -256,7 +258,11 @@ Key points:
 
 Only use `# Raise=` when you only care about the exception type/message and not the traceback.
 
-### Xfail Directive (Strict)
+### Python fixture markers
+
+You may mark python files with:
+* `# call-external` to support calling external functions
+* `# run-async` to support running async code
 
 NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!! INSTEAD FIX THE BEHAVIOR SO THAT THE TEST PASSES.
 
@@ -266,13 +272,16 @@ Never mark tests as:
 
 NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!! INSTEAD FIX THE BEHAVIOR SO THAT THE TEST PASSES.
 
+All these markers must be at the start of comment lines to be recognized.
+
 ### Other Notes
 
 - Prefer single quotes for strings in Python tests
-- do NOT add `# noqa` comments to test code, instead add the failing code to `pyproject.toml`
+- Do NOT add `# noqa` or  `# pyright: ignore` comments to test code, instead add the failing code to `pyproject.toml`
+- The ONLY exception is `await` expressions outside of async functions, where you should add `# pyright: ignore`
 - Run `make lint-py` after adding tests
 - Use `make complete-tests` to fill in blank expectations
-- Tests run via `datatest-stable` harness in `tests/datatest_runner.rs`
+- Tests run via `datatest-stable` harness in `tests/datatest_runner.rs`, use `make test-cases` to run them
 
 ## Python Package (`monty-python`)
 

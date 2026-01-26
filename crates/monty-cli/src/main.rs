@@ -18,7 +18,7 @@ fn main() -> ExitCode {
 
     let start = Instant::now();
     if let Some(failure) = type_check(&code, file_path).unwrap() {
-        eprintln!("type checking failed: {failure}");
+        eprintln!("type checking failed:\n{failure}");
     } else {
         eprintln!("type checking succeeded");
     }
@@ -91,6 +91,12 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
+                }
+                RunProgress::ResolveFutures(state) => {
+                    let elapsed = start.elapsed();
+                    let pending = state.pending_call_ids();
+                    eprintln!("{elapsed:?}, async futures not supported in CLI: {pending:?}");
+                    return ExitCode::FAILURE;
                 }
             }
         }
