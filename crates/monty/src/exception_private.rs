@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    fmt::{self, Write},
+    fmt::{self, Display, Write},
 };
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,12 @@ pub enum ExcType {
     /// Subclass of ImportError - for when a module cannot be found.
     ModuleNotFoundError,
 
+    // --- OSError hierarchy ---
+    /// OS-related errors (file not found, permission denied, etc.)
+    OSError,
+    /// Subclass of OSError - for when a file or directory cannot be found.
+    FileNotFoundError,
+
     // --- Standalone exception types ---
     AssertionError,
     MemoryError,
@@ -123,6 +129,8 @@ impl ExcType {
             Self::ValueError => matches!(self, Self::UnicodeDecodeError),
             // ImportError catches ModuleNotFoundError
             Self::ImportError => matches!(self, Self::ModuleNotFoundError),
+            // OSError catches FileNotFoundError
+            Self::OSError => matches!(self, Self::FileNotFoundError),
             // All other types only match exactly (handled by self == handler_type above)
             _ => false,
         }
@@ -182,10 +190,10 @@ impl ExcType {
     ///
     /// Sets `hide_caret: true` because CPython doesn't show carets for attribute GET errors.
     #[must_use]
-    pub(crate) fn attribute_error(type_: Type, attr: &str) -> RunError {
+    pub(crate) fn attribute_error(type_name: impl Display, attr: &str) -> RunError {
         let exc = SimpleException::new_msg(
             Self::AttributeError,
-            format!("'{type_}' object has no attribute '{attr}'"),
+            format!("'{type_name}' object has no attribute '{attr}'"),
         );
         RunError::Exc(ExceptionRaise {
             exc,
@@ -205,23 +213,6 @@ impl ExcType {
             format!("'{class_name}' object method '{method_name}' requires external call (not yet implemented)"),
         )
         .into()
-    }
-
-    /// Creates an AttributeError for when a specific attribute is not found (GET operation).
-    ///
-    /// Matches CPython's format: `AttributeError: 'ClassName' object has no attribute 'attr_name'`
-    /// Sets `hide_caret: true` because CPython doesn't show carets for attribute GET errors.
-    #[must_use]
-    pub(crate) fn attribute_error_not_found(class_name: &str, attr_name: &str) -> RunError {
-        let exc = SimpleException::new_msg(
-            Self::AttributeError,
-            format!("'{class_name}' object has no attribute '{attr_name}'"),
-        );
-        RunError::Exc(ExceptionRaise {
-            exc,
-            frame: None,
-            hide_caret: true, // CPython doesn't show carets for attribute GET errors
-        })
     }
 
     /// Creates an AttributeError for attribute assignment on types that don't support it.
@@ -585,7 +576,7 @@ impl ExcType {
 
     /// Creates a simple TypeError with a custom message.
     #[must_use]
-    pub(crate) fn type_error(msg: impl Into<String>) -> RunError {
+    pub(crate) fn type_error(msg: impl fmt::Display) -> RunError {
         SimpleException::new_msg(Self::TypeError, msg).into()
     }
 
@@ -834,11 +825,8 @@ impl ExcType {
     /// Used during parsing when encountering Python syntax that Monty doesn't yet support.
     /// The message format is: "The monty syntax parser does not yet support {feature}"
     #[must_use]
-    pub(crate) fn not_implemented(feature: &str) -> SimpleException {
-        SimpleException::new_msg(
-            Self::NotImplementedError,
-            format!("The monty syntax parser does not yet support {feature}"),
-        )
+    pub(crate) fn not_implemented(msg: impl fmt::Display) -> SimpleException {
+        SimpleException::new_msg(Self::NotImplementedError, msg)
     }
 
     /// Creates a ZeroDivisionError for division by zero.
@@ -1130,10 +1118,10 @@ impl SimpleException {
 
     /// Creates a new exception with the given type and argument message.
     #[must_use]
-    pub fn new_msg(exc_type: ExcType, arg: impl Into<String>) -> Self {
+    pub fn new_msg(exc_type: ExcType, arg: impl fmt::Display) -> Self {
         Self {
             exc_type,
-            arg: Some(arg.into()),
+            arg: Some(arg.to_string()),
         }
     }
 
@@ -1378,7 +1366,7 @@ impl From<FormatError> for RunError {
             FormatError::Overflow(_) => ExcType::OverflowError,
             FormatError::InvalidAlignment(_) | FormatError::ValueError(_) => ExcType::ValueError,
         };
-        Self::Exc(SimpleException::new_msg(exc_type, err.to_string()).into())
+        Self::Exc(SimpleException::new_msg(exc_type, err).into())
     }
 }
 

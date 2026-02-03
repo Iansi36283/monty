@@ -23,7 +23,7 @@ use crate::{
     types::{
         LongInt, PyTrait, Str, Tuple, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
-        slice,
+        path, slice,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
     },
 };
@@ -897,7 +897,12 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_div(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_div(
+        &self,
+        other: &Self,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> RunResult<Option<Value>> {
         match (self, other) {
             // True division always returns float
             (Self::Int(a), Self::Int(b)) => {
@@ -1044,7 +1049,15 @@ impl PyTrait for Value {
                     Err(ExcType::zero_division().into())
                 }
             }
-            _ => Ok(None),
+            _ => {
+                // Check for Path / (str or Path) - path concatenation
+                if let Self::Ref(id) = self
+                    && matches!(heap.get(*id), HeapData::Path(_))
+                {
+                    return path::path_div(*id, other, heap, interns);
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -1698,8 +1711,6 @@ impl Value {
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
     ) -> RunResult<Self> {
-        let attr_name = interns.get_str(name_id);
-
         if let Self::Ref(heap_id) = self {
             let heap_id = *heap_id;
             let heap_data = heap.get(heap_id);
@@ -1713,7 +1724,7 @@ impl Value {
                                 Ok(Some(value)) => Ok(value.clone_with_heap(heap)),
                                 Ok(None) => {
                                     // Use the dataclass's actual name for the error message
-                                    Err(ExcType::attribute_error_not_found(dc.name(), attr_name))
+                                    Err(ExcType::attribute_error(dc.name(), interns.get_str(name_id)))
                                 }
                                 Err(e) => Err(e),
                             }
@@ -1735,7 +1746,7 @@ impl Value {
                                 Ok(value)
                             } else {
                                 let module_name = interns.get_str(module.name());
-                                Err(ExcType::attribute_error_module(module_name, attr_name))
+                                Err(ExcType::attribute_error_module(module_name, interns.get_str(name_id)))
                             }
                         } else {
                             unreachable!("type changed during borrow")
@@ -1753,10 +1764,7 @@ impl Value {
                         }
                         Ok(copied)
                     } else {
-                        Err(ExcType::attribute_error_not_found(
-                            interns.get_str(nt.type_name()),
-                            attr_name,
-                        ))
+                        Err(ExcType::attribute_error(nt.py_type(heap), interns.get_str(name_id)))
                     }
                 }
                 HeapData::Exception(exc) => {
@@ -1774,11 +1782,12 @@ impl Value {
                         Ok(Self::Ref(tuple_id))
                     } else {
                         let exc_type = exc.py_type();
-                        Err(ExcType::attribute_error(exc_type, attr_name))
+                        Err(ExcType::attribute_error(exc_type, interns.get_str(name_id)))
                     }
                 }
                 HeapData::Slice(slice) => {
-                    // Handle slice attributes: start, stop, step
+                    // Handle slice attributes: start, stop,
+                    let attr_name = interns.get_str(name_id);
                     match attr_name {
                         "start" => Ok(slice::option_i64_to_value(slice.start)),
                         "stop" => Ok(slice::option_i64_to_value(slice.stop)),
@@ -1786,17 +1795,19 @@ impl Value {
                         _ => Err(ExcType::attribute_error(Type::Slice, attr_name)),
                     }
                 }
+                HeapData::Path(path) => {
+                    // Clone the path to avoid borrow conflict with heap
+                    let path_clone = path.clone();
+                    path::get_path_attr(&path_clone, interns.get_str(name_id), heap)
+                }
                 _ => {
                     let type_name = heap_data.py_type(heap);
-                    Err(ExcType::attribute_error(type_name, attr_name))
+                    Err(ExcType::attribute_error(type_name, interns.get_str(name_id)))
                 }
             }
-        } else if let Self::Marker(marker) = self {
-            // Markers don't support attribute access - report the marker's actual type
-            Err(ExcType::attribute_error(marker.py_type(), attr_name))
         } else {
             let type_name = self.py_type(heap);
-            Err(ExcType::attribute_error(type_name, attr_name))
+            Err(ExcType::attribute_error(type_name, interns.get_str(name_id)))
         }
     }
 
@@ -2054,7 +2065,7 @@ impl Value {
     ///
     /// Returns `Some(KeywordStr)` for `InternString` values or heap `str`
     /// objects, otherwise returns `None`.
-    pub fn as_either_str<T: ResourceTracker>(&self, heap: &mut Heap<T>) -> Option<EitherStr> {
+    pub fn as_either_str(&self, heap: &Heap<impl ResourceTracker>) -> Option<EitherStr> {
         match self {
             Self::InternString(id) => Some(EitherStr::Interned(*id)),
             Self::Ref(heap_id) => match heap.get(*heap_id) {
@@ -2064,11 +2075,20 @@ impl Value {
             _ => None,
         }
     }
+
+    /// check if the value is a string.
+    pub fn is_str(&self, heap: &Heap<impl ResourceTracker>) -> bool {
+        match self {
+            Self::InternString(_) => true,
+            Self::Ref(heap_id) => matches!(heap.get(*heap_id), HeapData::Str(_)),
+            _ => false,
+        }
+    }
 }
 
 /// Interned or heap-owned string identifier.
 #[derive(Debug, Clone)]
-pub enum EitherStr {
+pub(crate) enum EitherStr {
     /// Interned string identifier (cheap comparisons and no allocation).
     Interned(StringId),
     /// Heap-owned string extracted from a `str` object.

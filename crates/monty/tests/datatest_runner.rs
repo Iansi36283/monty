@@ -4,15 +4,18 @@ use std::{
     fs,
     panic::{self, AssertUnwindSafe},
     path::Path,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        OnceLock,
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
     time::Duration,
 };
 
 use ahash::AHashMap;
 use monty::{
-    ExcType, ExternalResult, LimitedTracker, MontyException, MontyFuture, MontyObject, MontyRun, ResourceLimits,
-    RunProgress, StdPrint,
+    ExcType, ExternalResult, LimitedTracker, MontyException, MontyFuture, MontyObject, MontyRun, OsFunction,
+    ResourceLimits, RunProgress, StdPrint, dir_stat, file_stat,
 };
 use pyo3::{prelude::*, types::PyDict};
 use similar::TextDiff;
@@ -248,6 +251,36 @@ const ITER_EXT_FUNCTIONS: &[&str] = &[
 /// `scripts/run_traceback.py` to ensure consistency.
 const ITER_EXT_FUNCTIONS_PYTHON: &str = include_str!("../../../scripts/iter_test_methods.py");
 
+/// Pre-imports Python modules that can cause race conditions during parallel test execution.
+///
+/// Python's import machinery isn't fully thread-safe during module initialization.
+/// When multiple tests try to import modules like `typing` or `dataclasses` simultaneously,
+/// one thread may see a partially initialized module, causing `AttributeError`.
+///
+/// This function must be called once before any parallel test execution to ensure
+/// all relevant modules are fully initialized.
+fn ensure_python_modules_imported() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        Python::attach(|py| {
+            // Import modules that are used by iter_test_methods.py and can cause race conditions.
+            // The order matters: import dependencies first.
+            py.import("typing").expect("Failed to import typing");
+            py.import("dataclasses").expect("Failed to import dataclasses");
+            py.import("pathlib").expect("Failed to import pathlib");
+            py.import("stat").expect("Failed to import stat");
+            py.import("asyncio").expect("Failed to import asyncio");
+            py.import("traceback").expect("Failed to import traceback");
+
+            // Also pre-execute the iter_test_methods code once to ensure all its
+            // module-level code (dataclass definitions, monkey-patches) is initialized
+            let ext_funcs_cstr = CString::new(ITER_EXT_FUNCTIONS_PYTHON).expect("Invalid C string");
+            py.run(&ext_funcs_cstr, None, None)
+                .expect("Failed to pre-initialize iter_test_methods");
+        });
+    });
+}
+
 /// Result from dispatching an external function call.
 ///
 /// Distinguishes between synchronous calls (return immediately) and
@@ -385,6 +418,202 @@ fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> DispatchResult 
             DispatchResult::Async(args.into_iter().next().unwrap())
         }
         _ => panic!("Unknown external function: {name}"),
+    }
+}
+
+// =============================================================================
+// Virtual Filesystem for OS Call Tests
+// =============================================================================
+
+/// Virtual file entry for OS call tests.
+struct VirtualFile {
+    content: &'static [u8],
+    mode: i64,
+}
+
+/// Virtual filesystem modification time (arbitrary fixed timestamp).
+const VFS_MTIME: f64 = 1_700_000_000.0;
+
+/// Virtual filesystem for testing Path methods.
+///
+/// Structure:
+/// ```text
+/// /virtual/
+/// ├── file.txt           (file, 644, "hello world\n")
+/// ├── data.bin           (file, 644, b"\x00\x01\x02\x03")
+/// ├── empty.txt          (file, 644, "")
+/// ├── subdir/
+/// │   ├── nested.txt     (file, 644, "nested content")
+/// │   └── deep/
+/// │       └── file.txt   (file, 644, "deep")
+/// └── readonly.txt       (file, 444, "readonly")
+///
+/// /nonexistent           (does not exist)
+/// ```
+fn get_virtual_file(path: &str) -> Option<VirtualFile> {
+    match path {
+        "/virtual/file.txt" => Some(VirtualFile {
+            content: b"hello world\n",
+            mode: 0o644,
+        }),
+        "/virtual/data.bin" => Some(VirtualFile {
+            content: b"\x00\x01\x02\x03",
+            mode: 0o644,
+        }),
+        "/virtual/empty.txt" => Some(VirtualFile {
+            content: b"",
+            mode: 0o644,
+        }),
+        "/virtual/subdir/nested.txt" => Some(VirtualFile {
+            content: b"nested content",
+            mode: 0o644,
+        }),
+        "/virtual/subdir/deep/file.txt" => Some(VirtualFile {
+            content: b"deep",
+            mode: 0o644,
+        }),
+        "/virtual/readonly.txt" => Some(VirtualFile {
+            content: b"readonly",
+            mode: 0o444,
+        }),
+        _ => None,
+    }
+}
+
+/// Check if the given path is a directory in the virtual filesystem.
+fn is_virtual_dir(path: &str) -> bool {
+    matches!(path, "/virtual" | "/virtual/subdir" | "/virtual/subdir/deep")
+}
+
+/// Get directory entries for a virtual directory.
+fn get_virtual_dir_entries(path: &str) -> Option<Vec<&'static str>> {
+    match path {
+        "/virtual" => Some(vec![
+            "/virtual/file.txt",
+            "/virtual/data.bin",
+            "/virtual/empty.txt",
+            "/virtual/subdir",
+            "/virtual/readonly.txt",
+        ]),
+        "/virtual/subdir" => Some(vec!["/virtual/subdir/nested.txt", "/virtual/subdir/deep"]),
+        "/virtual/subdir/deep" => Some(vec!["/virtual/subdir/deep/file.txt"]),
+        _ => None,
+    }
+}
+
+/// Dispatches an OS function call using the virtual filesystem.
+///
+/// Returns an `ExternalResult` to pass back to the Monty interpreter.
+/// Raises `FileNotFoundError` for missing files/directories.
+#[expect(clippy::cast_possible_wrap)] // Virtual file sizes are tiny, no wrap possible
+fn dispatch_os_call(function: OsFunction, args: &[MontyObject]) -> ExternalResult {
+    // Extract path from MontyObject::Path (or String for backwards compatibility)
+    let path = match &args[0] {
+        MontyObject::Path(p) => p.clone(),
+        MontyObject::String(s) => s.clone(),
+        other => panic!("OS call: first arg must be path, got {other:?}"),
+    };
+
+    match function {
+        OsFunction::Exists => {
+            let exists = get_virtual_file(&path).is_some() || is_virtual_dir(&path);
+            MontyObject::Bool(exists).into()
+        }
+        OsFunction::IsFile => {
+            let is_file = get_virtual_file(&path).is_some();
+            MontyObject::Bool(is_file).into()
+        }
+        OsFunction::IsDir => {
+            let is_dir = is_virtual_dir(&path);
+            MontyObject::Bool(is_dir).into()
+        }
+        OsFunction::IsSymlink => {
+            // Virtual filesystem doesn't have symlinks
+            MontyObject::Bool(false).into()
+        }
+        OsFunction::ReadText => {
+            if let Some(file) = get_virtual_file(&path) {
+                match std::str::from_utf8(file.content) {
+                    Ok(text) => MontyObject::String(text.to_owned()).into(),
+                    Err(_) => MontyException::new(
+                        ExcType::UnicodeDecodeError,
+                        Some("'utf-8' codec can't decode bytes".to_owned()),
+                    )
+                    .into(),
+                }
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::ReadBytes => {
+            if let Some(file) = get_virtual_file(&path) {
+                MontyObject::Bytes(file.content.to_vec()).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Stat => {
+            if let Some(file) = get_virtual_file(&path) {
+                file_stat(file.mode, file.content.len() as i64, VFS_MTIME).into()
+            } else if is_virtual_dir(&path) {
+                dir_stat(0o755, VFS_MTIME).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Iterdir => {
+            if let Some(entries) = get_virtual_dir_entries(&path) {
+                // Return Path objects, not strings
+                let list: Vec<MontyObject> = entries.iter().map(|e| MontyObject::Path((*e).to_owned())).collect();
+                MontyObject::List(list).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Resolve | OsFunction::Absolute => {
+            // For virtual paths, return as-is (they're already absolute)
+            MontyObject::String(path).into()
+        }
+        OsFunction::Getenv => {
+            // Virtual environment for testing os.getenv()
+            // args[0] is key, args[1] is default (may be None)
+            let key = String::try_from(&args[0]).expect("getenv: first arg must be key string");
+            let default = &args[1];
+
+            // Provide a few test environment variables
+            let value = match key.as_str() {
+                "VIRTUAL_HOME" => Some("/virtual/home"),
+                "VIRTUAL_USER" => Some("testuser"),
+                "VIRTUAL_EMPTY" => Some(""),
+                _ => None,
+            };
+
+            if let Some(v) = value {
+                MontyObject::String(v.to_owned()).into()
+            } else if matches!(default, MontyObject::None) {
+                MontyObject::None.into()
+            } else {
+                // Return the default value
+                default.clone().into()
+            }
+        }
+        _ => panic!("OS function not implemented in tests: {function:?}"),
     }
 }
 
@@ -804,6 +1033,12 @@ fn run_iter_loop(exec: MontyRun) -> Result<MontyObject, MontyException> {
 
                 progress = state.resume(results, &mut StdPrint)?;
             }
+            RunProgress::OsCall {
+                function, args, state, ..
+            } => {
+                let result = dispatch_os_call(function, &args);
+                progress = state.run(result, &mut StdPrint)?;
+            }
         }
     }
 }
@@ -998,6 +1233,10 @@ fn try_run_cpython_test(
     iter_mode: bool,
     async_mode: bool,
 ) -> Result<(), TestFailure> {
+    // Ensure Python modules are imported before parallel tests access them.
+    // This prevents race conditions during module initialization.
+    ensure_python_modules_imported();
+
     // Skip RefCounts tests - only relevant for Monty
     if matches!(expectation, Expectation::RefCounts(_)) {
         return Ok(());

@@ -29,6 +29,7 @@ use crate::{
     io::PrintWriter,
     modules::BuiltinModule,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
+    os::OsFunction,
     parse::CodeRange,
     resource::ResourceTracker,
     types::{LongInt, MontyIter, PyTrait, iter::advance_on_heap},
@@ -162,6 +163,20 @@ pub enum FrameExit {
     ExternalCall {
         /// ID of the external function to call.
         ext_function_id: ExtFunctionId,
+        /// Arguments for the external function (includes both positional and keyword args).
+        args: ArgValues,
+        /// Unique ID for this call, used for async correlation.
+        call_id: CallId,
+    },
+
+    /// Execution paused for an os function call.
+    ///
+    /// The caller should execute a function corresponding to the `os_call` and call `resume()`
+    /// with the result. The `call_id` allows the host to use async resolution
+    /// by calling `run_pending()` instead of `run(result)`.
+    OsCall {
+        /// ID of the os function to call.
+        function: OsFunction,
         /// Arguments for the external function (includes both positional and keyword args).
         args: ArgValues,
         /// Unique ID for this call, used for async correlation.
@@ -487,7 +502,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
     pub fn check_snapshot(mut self, result: &RunResult<FrameExit>) -> Option<VMSnapshot> {
         if matches!(
             result,
-            Ok(FrameExit::ExternalCall { .. } | FrameExit::ResolveFutures(_))
+            Ok(FrameExit::ExternalCall { .. } | FrameExit::OsCall { .. } | FrameExit::ResolveFutures(_))
         ) {
             Some(self.snapshot())
         } else {
@@ -1085,6 +1100,14 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                                 call_id,
                             });
                         }
+                        Ok(CallResult::OsCall(func, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::OsCall {
+                                function: func,
+                                args,
+                                call_id,
+                            });
+                        }
                         Err(err) => catch_sync!(self, cached_frame, err),
                     }
                 }
@@ -1135,6 +1158,14 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                                 call_id,
                             });
                         }
+                        Ok(CallResult::OsCall(func, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::OsCall {
+                                function: func,
+                                args,
+                                call_id,
+                            });
+                        }
                         Err(err) => catch_sync!(self, cached_frame, err),
                     }
                 }
@@ -1145,9 +1176,28 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     let arg_count = fetch_u8!(cached_frame) as usize;
                     let name_id = StringId::from_index(name_idx);
 
+                    // Sync IP before call (may yield to host for OS/external calls)
+                    self.current_frame_mut().ip = cached_frame.ip;
+
                     match self.exec_call_attr(name_id, arg_count) {
-                        Ok(result) => self.push(result),
-                        // IP sync deferred to error path (no frame push possible)
+                        Ok(CallResult::Push(result)) => self.push(result),
+                        Ok(CallResult::OsCall(func, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::OsCall {
+                                function: func,
+                                args,
+                                call_id,
+                            });
+                        }
+                        Ok(CallResult::FramePushed) => reload_cache!(self, cached_frame),
+                        Ok(CallResult::External(ext_id, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::ExternalCall {
+                                ext_function_id: ext_id,
+                                args,
+                                call_id,
+                            });
+                        }
                         Err(err) => catch_sync!(self, cached_frame, err),
                     }
                 }
@@ -1165,9 +1215,28 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         kwname_ids.push(StringId::from_index(fetch_u16!(cached_frame)));
                     }
 
+                    // Sync IP before call (may yield to host for OS/external calls)
+                    self.current_frame_mut().ip = cached_frame.ip;
+
                     match self.exec_call_attr_kw(name_id, pos_count, kwname_ids) {
-                        Ok(result) => self.push(result),
-                        // IP sync deferred to error path (no frame push possible)
+                        Ok(CallResult::Push(result)) => self.push(result),
+                        Ok(CallResult::OsCall(func, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::OsCall {
+                                function: func,
+                                args,
+                                call_id,
+                            });
+                        }
+                        Ok(CallResult::FramePushed) => reload_cache!(self, cached_frame),
+                        Ok(CallResult::External(ext_id, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::ExternalCall {
+                                ext_function_id: ext_id,
+                                args,
+                                call_id,
+                            });
+                        }
                         Err(err) => catch_sync!(self, cached_frame, err),
                     }
                 }
@@ -1185,6 +1254,14 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                             let call_id = self.allocate_call_id();
                             return Ok(FrameExit::ExternalCall {
                                 ext_function_id: ext_id,
+                                args,
+                                call_id,
+                            });
+                        }
+                        Ok(CallResult::OsCall(func, args)) => {
+                            let call_id = self.allocate_call_id();
+                            return Ok(FrameExit::OsCall {
+                                function: func,
                                 args,
                                 call_id,
                             });
